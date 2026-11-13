@@ -1,0 +1,16 @@
+{
+  "runId": "default",
+  "agent": "default",
+  "input": "hello",
+  "output": "Hello, Agent runtime initialized.",
+  "steps": [
+    {
+      "type": "final",
+      "iteration": 1,
+      "output": "Hello, Agent runtime initialized.",
+      "timestamp": "2026-10-29T08:02:09.776Z"
+    }
+  ],
+  "createdAt": "2026-10-29T08:02:09.776Z",
+  "updatedAt": "2026-10-29T08:02:09.776Z"
+}

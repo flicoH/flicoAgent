@@ -1,0 +1,98 @@
+{
+  "name": "@flicoh/agent",
+  "version": "1.0.0",
+  "main": "index.js",
+  "files": [
+    "dist",
+    "index.js",
+    "app",
+    "config",
+    "model"
+  ],
+  "scripts": {
+    "build": "nest build",
+    "build:watch": "nest build --watch",
+    "prepublishOnly": "npm run build",
+    "lint": "eslint --quiet --ext .js,.vue .",
+    "test": "__ENV='local' mocha --recursive ./test/**/*.test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git@git.code.tencent.com:flicoH/flicoH-elips.git"
+  },
+  "author": "flicoH",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@babel/runtime": "^8.0.5",
+    "@langchain/core": "^1.3.6",
+    "@langchain/langgraph": "^1.7.3",
+    "@langchain/openai": "^1.8.2",
+    "@nestjs/common": "^12.0.0",
+    "@nestjs/core": "^12.0.0",
+    "@nestjs/platform-express": "^12.0.0",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "ajv": "^6.10.2",
+    "axios": "^0.19.2",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.15.1",
+    "echarts": "^5.5.0",
+    "element-plus": "^2.3.7",
+    "express": "^5.3.0",
+    "generate-password": "^1.7.1",
+    "glob": "^7.1.4",
+    "jsonwebtoken": "^9.0.2",
+    "knex": "^0.19.0",
+    "less": "^4.1.0",
+    "lodash": "^4.17.21",
+    "log4js": "^6.9.1",
+    "md5": "^2.2.1",
+    "moment": "^2.29.4",
+    "mysql2": "^3.24.6",
+    "nunjucks": "^3.2.4",
+    "pinia": "^2.1.6",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "superagent": "^8.1.2",
+    "vite": "^8.3.3",
+    "vue": "^3.3.4",
+    "vue-json-viewer": "^3.0.4",
+    "vue-router": "^4.2.4",
+    "vuex": "^4.1.0"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^12.0.0",
+    "@nestjs/schematics": "^12.0.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "@types/nunjucks": "^3.2.6",
+    "assert": "^2.0.0",
+    "babel-eslint": "^10.0.2",
+    "eslint": "^7.32.0",
+    "eslint-plugin-import": "^2.28.1",
+    "eslint-plugin-vue": "^9.17.0",
+    "ghooks": "~1.0.3",
+    "mocha": "^6.1.4",
+    "supertest": "^4.0.2",
+    "typescript": "^6.0.0",
+    "validate-commit-msg": "~2.14.0"
+  },
+  "config": {
+    "ghooks": {
+      "commit-msg": "validate-commit-msg",
+      "pre-commit": "npm run lint"
+    }
+  },
+  "exports": {
+    ".": "./index.js",
+    "./eval/assertions": "./dist/ai/eval/assertions.js",
+    "./assertions": "./dist/ai/eval/assertions.js",
+    "./types/express": "./app/types/express.d.ts",
+    "./nest-core": "./dist/nest-core.js",
+    "./dist/*.js": "./dist/*.js",
+    "./dist/*": [
+      "./dist/*.js",
+      "./dist/*"
+    ]
+  }
+}

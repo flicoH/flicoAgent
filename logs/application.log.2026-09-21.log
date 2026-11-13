@@ -1,0 +1,24 @@
+[2026-09-21T20:30:30.499] [INFO] dateFile - [GET /api/project/list] signature: 2c9bbc51789ddac1ff273707d7b90e6a
+[2026-09-21T20:30:30.499] [INFO] dateFile - [GET /api/project/list] body: {}
+[2026-09-21T20:30:30.499] [INFO] dateFile - [GET /api/project/list] query: {}
+[2026-09-21T20:30:30.499] [INFO] dateFile - [GET /api/project/list] headers: {"host":"127.0.0.1:52804","accept-encoding":"gzip, deflate","user-agent":"node-superagent/3.8.3","s_t":"1789993830282","s_sign":"2c9bbc51789ddac1ff273707d7b90e6a","connection":"close"}
+[2026-09-21T20:30:30.521] [INFO] dateFile - [GET /api/project/list] signature: 2c9bbc51789ddac1ff273707d7b90e6a
+[2026-09-21T20:30:30.522] [INFO] dateFile - [GET /api/project/list] body: {}
+[2026-09-21T20:30:30.522] [INFO] dateFile - [GET /api/project/list] query: {"proj_key":"pdd"}
+[2026-09-21T20:30:30.522] [INFO] dateFile - [GET /api/project/list] headers: {"host":"127.0.0.1:52804","accept-encoding":"gzip, deflate","user-agent":"node-superagent/3.8.3","s_t":"1789993830282","s_sign":"2c9bbc51789ddac1ff273707d7b90e6a","connection":"close"}
+[2026-09-21T20:30:30.526] [INFO] dateFile - [GET /api/project] signature: 2c9bbc51789ddac1ff273707d7b90e6a
+[2026-09-21T20:30:30.526] [INFO] dateFile - [GET /api/project] body: {}
+[2026-09-21T20:30:30.527] [INFO] dateFile - [GET /api/project] query: {}
+[2026-09-21T20:30:30.527] [INFO] dateFile - [GET /api/project] headers: {"host":"127.0.0.1:52804","accept-encoding":"gzip, deflate","user-agent":"node-superagent/3.8.3","s_t":"1789993830282","s_sign":"2c9bbc51789ddac1ff273707d7b90e6a","connection":"close"}
+[2026-09-21T20:30:30.529] [INFO] dateFile - [GET /api/project] signature: 2c9bbc51789ddac1ff273707d7b90e6a
+[2026-09-21T20:30:30.529] [INFO] dateFile - [GET /api/project] body: {}
+[2026-09-21T20:30:30.529] [INFO] dateFile - [GET /api/project] query: {"proj_key":"test"}
+[2026-09-21T20:30:30.529] [INFO] dateFile - [GET /api/project] headers: {"host":"127.0.0.1:52804","accept-encoding":"gzip, deflate","user-agent":"node-superagent/3.8.3","s_t":"1789993830282","s_sign":"2c9bbc51789ddac1ff273707d7b90e6a","connection":"close"}
+[2026-09-21T20:30:30.530] [INFO] dateFile - [GET /api/project] signature: 2c9bbc51789ddac1ff273707d7b90e6a
+[2026-09-21T20:30:30.530] [INFO] dateFile - [GET /api/project] body: {}
+[2026-09-21T20:30:30.530] [INFO] dateFile - [GET /api/project] query: {"proj_key":"jd"}
+[2026-09-21T20:30:30.530] [INFO] dateFile - [GET /api/project] headers: {"host":"127.0.0.1:52804","accept-encoding":"gzip, deflate","user-agent":"node-superagent/3.8.3","s_t":"1789993830282","s_sign":"2c9bbc51789ddac1ff273707d7b90e6a","connection":"close"}
+[2026-09-21T20:30:30.537] [INFO] dateFile - [GET /api/project/model_list] signature: 2c9bbc51789ddac1ff273707d7b90e6a
+[2026-09-21T20:30:30.537] [INFO] dateFile - [GET /api/project/model_list] body: {}
+[2026-09-21T20:30:30.537] [INFO] dateFile - [GET /api/project/model_list] query: {}
+[2026-09-21T20:30:30.537] [INFO] dateFile - [GET /api/project/model_list] headers: {"host":"127.0.0.1:52804","accept-encoding":"gzip, deflate","user-agent":"node-superagent/3.8.3","s_t":"1789993830282","s_sign":"2c9bbc51789ddac1ff273707d7b90e6a","connection":"close"}
