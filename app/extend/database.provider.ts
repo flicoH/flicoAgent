@@ -9,7 +9,8 @@ export class DatabaseProvider {
   constructor(config: ConfigService) {
     const db = config.get<knex.Config>('db');
     if (db) {
-      this.knex = knex(db);
+      // 兼容旧配置中的 mysql 别名，框架随包提供 mysql2 驱动。
+      this.knex = knex(db.client === 'mysql' ? { ...db, client: 'mysql2' } : db);
     }
   }
 }

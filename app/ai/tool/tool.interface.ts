@@ -1,18 +1,21 @@
 import type { ModuleRef } from '@nestjs/core';
+import type { ConfigService } from '../../config/config.service';
 
 /**
  * 统一工具契约定义 (ToolDefinition)
  *
  * 【职责划分】
- * Tool 代表通用、底层的可调用工具（例如框架内置的反射调用工具 `service-invoke`、
+ * Tool 代表通用、底层的可调用工具（例如框架内置的检索工具 `retrieve`、
  * RAG 检索工具、或通过 MCP 协议动态转接的外部工具等）。
  *
  * 与业务侧的 Skill 相比，Tool 更加通用底层，通过 `ToolRegistryService` 统一管理。
  */
 export interface ToolDefinition {
+  /** 有副作用的能力可要求人工审批后执行。 */
+  approval?: 'required';
   /**
    * 工具的唯一注册名称
-   * 同时作为大模型 Function Calling 中的函数名，如 'service-invoke'
+   * 同时作为大模型 Function Calling 中的函数名，如 'retrieve'
    */
   name: string;
 
@@ -34,7 +37,7 @@ export interface ToolDefinition {
    * @param input 模型规划器解析生成的结构化入参
    * @returns 工具执行后产出的可序列化结果
    */
-  execute(input: unknown): Promise<unknown>;
+  execute(input: unknown, context?: Record<string, unknown>): Promise<unknown>;
 
   /**
    * 标记该工具的来源分类
@@ -52,6 +55,7 @@ export interface BuiltinToolDeps {
    * 允许内置工具按需动态检索已注入 Nest 容器的各类 Provider/Service 实例
    */
   moduleRef: ModuleRef;
+  config?: ConfigService;
 }
 
 /**

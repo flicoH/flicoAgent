@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync } from 'node:fs';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
+import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { MemoryStore, ThreadCheckpoint } from '../store.interface';
+import { writeJsonAtomically } from './write-json-atomically';
 
 /**
  * 文件型 Memory 存储唯一实现 (FileMemoryStore)
@@ -36,13 +37,7 @@ export class FileMemoryStore implements MemoryStore {
     if (!checkpoint || typeof checkpoint.threadId !== 'string') {
       throw new Error('ThreadCheckpoint must have a valid string threadId');
     }
-    await mkdir(this.rootDir, { recursive: true });
-    const target = this.filePath(checkpoint.threadId);
-    const temporary = `${target}.tmp`;
-
-    // 采用临时文件写入 + rename 原子替换
-    await writeFile(temporary, JSON.stringify(checkpoint, null, 2), 'utf8');
-    await rename(temporary, target);
+    await writeJsonAtomically(this.filePath(checkpoint.threadId), checkpoint);
   }
 
   /**

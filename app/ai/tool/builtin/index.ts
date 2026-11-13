@@ -1,5 +1,4 @@
 import type { BuiltinToolFactory } from '../tool.interface';
-import serviceInvokeTool from './service-invoke.tool';
 import retrieveTool from './retrieve.tool';
 
 /**
@@ -11,6 +10,5 @@ import retrieveTool from './retrieve.tool';
  * 2. 在本数组中追加导出即可，`ToolRegistryService` 将在初始化时统一实例化注册。
  */
 export const builtinTools: BuiltinToolFactory[] = [
-  serviceInvokeTool,
   retrieveTool,
 ];

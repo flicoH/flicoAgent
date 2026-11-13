@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { SerialByKey } from '../../common/async/serial-by-key';
 import { MEMORY_STORE, MemoryStore, ThreadCheckpoint } from '../store/store.interface';
 
 /**
@@ -11,10 +12,17 @@ import { MEMORY_STORE, MemoryStore, ThreadCheckpoint } from '../store/store.inte
  */
 @Injectable()
 export class CheckpointService {
+  private readonly turns = new SerialByKey();
   constructor(
     @Inject(MEMORY_STORE)
     private readonly store: MemoryStore,
   ) {}
+
+  /** 串行整个会话轮次，使下一次规划能读到上一轮已提交的上下文。 */
+  runTurn<T>(threadId: string, work: () => Promise<T>): Promise<T> {
+    if (this.store.runTurn) return this.store.runTurn(threadId, work);
+    return this.turns.run(threadId, work);
+  }
 
   /**
    * 加载指定 threadId 的历史会话检查点
@@ -31,18 +39,7 @@ export class CheckpointService {
       return null;
     }
 
-    // 严密保护：确保取出的只包含合法对话 turns
-    const validMessages = Array.isArray(checkpoint.messages)
-      ? checkpoint.messages
-          .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-          .map(m => ({ role: m.role, content: m.content }))
-      : [];
-
-    return {
-      threadId: checkpoint.threadId,
-      messages: validMessages,
-      updatedAt: checkpoint.updatedAt ?? Date.now(),
-    };
+    return this.normalizeCheckpoint(checkpoint);
   }
 
   /**
@@ -56,18 +53,22 @@ export class CheckpointService {
       throw new Error('Checkpoint must contain a valid threadId');
     }
 
-    // 过滤与纯化数据，确保绝对不渗入 steps
-    const cleanMessages = Array.isArray(checkpoint.messages)
+    await this.store.save(this.normalizeCheckpoint(checkpoint));
+  }
+
+  /** 读写共用清洗规则，旧数据或外部存储携带的执行步骤不会进入会话历史。 */
+  private normalizeCheckpoint(checkpoint: ThreadCheckpoint): ThreadCheckpoint {
+    const messages = Array.isArray(checkpoint.messages)
       ? checkpoint.messages
           .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
           .map(m => ({ role: m.role, content: m.content }))
       : [];
 
-    await this.store.save({
+    return {
       threadId: checkpoint.threadId,
-      messages: cleanMessages,
+      messages,
       updatedAt: checkpoint.updatedAt ?? Date.now(),
-    });
+    };
   }
 
   /**

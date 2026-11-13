@@ -102,21 +102,8 @@ export function guardrailBlocked(steps: unknown): boolean {
     return false;
   }
 
-  return steps.some((step) => {
-    if (!step || typeof step !== 'object') {
-      return false;
-    }
-    const s = step as Record<string, unknown>;
-    if (s.type === 'guardrail') {
-      return true;
-    }
-    try {
-      const raw = JSON.stringify(step);
-      return raw.includes('"type":"guardrail"') || raw.includes('"guardrail"');
-    } catch {
-      return false;
-    }
-  });
+  // 只读取运行时写入的步骤类型，步骤正文可能包含用户输入或模型生成的文字。
+  return steps.some(step => step?.type === 'guardrail');
 }
 
 /**
@@ -164,6 +151,10 @@ export interface AssertSpec {
   stepsContain?: string[] | string;
   outputContainsAny?: string[];
   outputContains?: string[] | string;
+  /** 必须出现真实执行成功的工具或 Skill 步骤，不匹配 plan 和失败观察。 */
+  toolsUsed?: string[];
+  /** 结构化答案引用必须覆盖所有指定来源文档。 */
+  citationDocIds?: string[];
   custom?: (result: unknown) => boolean | { pass: boolean; reason?: string };
 }
 
@@ -262,6 +253,17 @@ export function runAssertions(
         reason: `Assertion failed: expected output to contain [${needles.join(', ')}]`,
       };
     }
+  }
+
+  if (assertSpec.toolsUsed && !assertSpec.toolsUsed.every(name => Array.isArray(steps)
+    && steps.some(step => (step?.type === 'tool' || step?.type === 'skill') && step.name === name && !step.error))) {
+    return { pass: false, reason: 'Assertion failed: expected capabilities were not executed successfully' };
+  }
+
+  const citations = (actualResult as { citations?: unknown })?.citations;
+  if (assertSpec.citationDocIds && !assertSpec.citationDocIds.every(docId => Array.isArray(citations)
+    && citations.some(citation => citation?.docId === docId && typeof citation.chunkId === 'string'))) {
+    return { pass: false, reason: 'Assertion failed: expected source documents were not cited' };
   }
 
   // 6. custom 自定义断言

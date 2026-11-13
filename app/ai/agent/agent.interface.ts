@@ -9,6 +9,8 @@
  * 执行能力统一由 `Skill`（业务层）和 `Tool`（通用工具层）提供。
  */
 export interface AgentDefinition {
+  /** 允许通过 agent-delegate 调用的子 Agent 注册名。 */
+  delegates?: string[];
   /**
    * Agent 的唯一注册名称
    * 用于客户端请求（如 POST /api/ai/agent/run）时识别和定位 Agent，禁止重名
@@ -23,7 +25,7 @@ export interface AgentDefinition {
 
   /**
    * Agent 允许调用的 Tool（通用工具）名称列表
-   * 仅在此白名单中的 Tool 会注册到本次 Agent 运行环境中（如 service-invoke 等）
+   * 仅在此白名单中的 Tool 会注册到本次 Agent 运行环境中（如 retrieve）
    */
   tools: string[];
 

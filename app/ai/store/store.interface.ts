@@ -1,4 +1,4 @@
-import type { TraceRun } from '../runtime/runtime.types';
+import type { TraceRun } from '../contracts';
 
 /**
  * TraceStore 依赖注入标识 (Token)
@@ -16,6 +16,9 @@ export const TRACE_STORE = Symbol('TRACE_STORE');
  * 负责保存与读取 Agent 的全量运行轨迹（包含 runId、输入参数、执行轮次步骤、最终回答等）。
  */
 export interface TraceStore {
+  /** 按时间倒序分页，必须先过滤 scope 和 Agent 白名单。 */
+  list?(query: TraceListQuery): Promise<TraceRun[]>;
+
   /**
    * 保存（新增或覆盖）一条运行记录
    *
@@ -30,6 +33,13 @@ export interface TraceStore {
    * @returns 匹配的 TraceRun 记录，未找到时返回 null
    */
   load(runId: string): Promise<TraceRun | null>;
+}
+
+export interface TraceListQuery {
+  scope?: string;
+  agents?: readonly string[];
+  limit: number;
+  offset: number;
 }
 
 /**
@@ -69,6 +79,9 @@ export const MEMORY_STORE = Symbol('MEMORY_STORE');
  * 负责保存、读取与删除 Thread 的多轮对话检查点
  */
 export interface MemoryStore {
+  /** 多实例存储可用跨进程锁保护整个会话轮次。 */
+  runTurn?<T>(threadId: string, work: () => Promise<T>): Promise<T>;
+
   /**
    * 保存（新增或覆盖）指定线程的检查点
    *
@@ -136,12 +149,24 @@ export interface VectorQueryResult {
  * 统一管理文档切片的高维向量与元数据存储，支撑 RAG 近邻相似度查询。
  */
 export interface VectorStore {
+  /** 管理接口只操作配置的知识库根目录，避免同一存储中的其他索引被修改。 */
+  documents?(root: string): Promise<Array<{ docId: string; chunks: number }>>;
+  removeDocument?(root: string, docId: string): Promise<number>;
+  loadChunk?(root: string, chunkId: string): Promise<VectorQueryResult | null>;
   /**
    * 批量写入或更新向量切片记录
    *
    * @param records 待持久化的向量记录数组
    */
   upsert(records: VectorRecord[]): Promise<void>;
+
+  /** 原子替换指定目录的索引，保留本次读取或向量化失败的文档。目录以知识库根目录为基准。 */
+  syncDirectory?(input: {
+    root: string;
+    directory: string;
+    records: VectorRecord[];
+    failedDocIds: string[];
+  }): Promise<void>;
 
   /**
    * 根据查询向量检索 TopK 相似片段
@@ -150,5 +175,5 @@ export interface VectorStore {
    * @param topK 返回的最相似结果条数
    * @returns 匹配的向量结果切片列表（按 score 降序排列）
    */
-  query(embedding: number[], topK: number): Promise<VectorQueryResult[]>;
+  query(embedding: number[], topK: number, root?: string): Promise<VectorQueryResult[]>;
 }

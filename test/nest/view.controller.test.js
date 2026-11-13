@@ -67,7 +67,9 @@ describe('View 壳（不启动服务）', () => {
     assert(html.includes('<title>业务站点</title>'));
     assert(html.includes('<env>local</env>'));
     assert(html.includes('<project>jd</project>'));
-    assert(html.includes('<options>{&quot;homePage&quot;:&quot;/view/project-list&quot;}</options>'));
+    assert.deepStrictEqual(JSON.parse(html.match(/<options>(.*?)<\/options>/)[1].replace(/&quot;/g, '"')), {
+      homePage: '/view/project-list', agentConfig: { threadEnabled: true },
+    });
     assert(html.includes('<extra></extra>'));
     assert(!html.includes('NOT_A_TEMPLATE_VARIABLE'));
     assert.strictEqual(Reflect.getMetadata('__headers__', ViewController.prototype.renderPage)[0].value, 'text/html; charset=utf-8');

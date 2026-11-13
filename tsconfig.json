@@ -4,7 +4,7 @@
     "moduleResolution": "node",
     "types": ["node"],
     "target": "ES2023",
-    "lib": ["ES2021"],
+    "lib": ["ES2023"],
     "rootDir": "./app",
     "outDir": "./dist",
     "declaration": true,

@@ -1,12 +1,13 @@
+const { TraceService } = require('../../dist/ai/trace/trace.service');
 const assert = require('assert');
-const { resolveMaxIterations } = require('../../dist/ai/lc-lg-runtime/internal/load-runtime-config');
-const { SkillToolAdapter } = require('../../dist/ai/lc-lg-runtime/langchain/skill-tool.adapter');
-const { LangChainPlannerService, toLangChainMessages, resolveModelEndpoint } = require('../../dist/ai/lc-lg-runtime/langchain/langchain-planner.service');
-const { createAgentGraph, defaultAgentGraph } = require('../../dist/ai/lc-lg-runtime/langgraph/agent.graph');
-const { LangGraphOrchestratorService } = require('../../dist/ai/lc-lg-runtime/langgraph/langgraph-orchestrator.service');
-const { ExecutorService } = require('../../dist/ai/runtime/executor.service');
+const { resolveMaxIterations } = require('../../dist/ai/runtime/internal/load-runtime-config');
+const { SkillToolAdapter } = require('../../dist/ai/runtime/langchain/skill-tool.adapter');
+const { LangChainPlannerService, toLangChainMessages } = require('../../dist/ai/runtime/langchain/langchain-planner.service');
+const { createAgentGraph, defaultAgentGraph } = require('../../dist/ai/runtime/langgraph/agent.graph');
+const { LangGraphOrchestratorService } = require('../../dist/ai/runtime/langgraph/langgraph-orchestrator.service');
+const { ExecutorService } = require('../../dist/ai/tool/executor.service');
 
-describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
+describe('T12: runtime · LangChain Planner · LangGraph 循环', () => {
   describe('1. load-runtime-config: resolveMaxIterations', () => {
     it('正确读取 ai.runtime.maxIterations 正数值', () => {
       const config = {
@@ -167,7 +168,7 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
             return {
               default: 'test-model',
               models: {
-                'test-model': { provider: 'openai-compatible', baseURL: 'http://localhost', apiKey: 'mock' },
+                'test-model': { provider: 'openai-compatible', baseURL: 'http://localhost', model: 'test-model', apiKey: 'mock' },
               },
             };
           }
@@ -193,7 +194,10 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
     });
 
     it('当模型产出 tool_calls 时返回 toolCalls 数组并保留结构', async () => {
-      const mockConfig = { get: () => undefined };
+      const mockConfig = { get: key => key === 'ai.llm' ? {
+        default: 'test',
+        models: { test: { provider: 'openai-compatible', baseURL: 'http://localhost', model: 'test', apiKey: 'mock' } },
+      } : undefined };
       const planner = new LangChainPlannerService(mockConfig);
 
       planner.bindTools = () => ({
@@ -218,54 +222,17 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
       assert.strictEqual(planResult.finalAnswer, undefined);
     });
 
-    it('resolveModelEndpoint 与 getModel 准确解析主流兼容厂商 (kimi/qwen/deepseek) 的 baseURL 与 model', () => {
-      // 1. 测试 kimi 厂商映射
-      const kimiResolved = resolveModelEndpoint('kimi', { apiKey: 'sk-kimi-key' });
-      assert.strictEqual(kimiResolved.baseURL, 'https://api.moonshot.cn/v1');
-      assert.strictEqual(kimiResolved.model, 'kimi-k2.6');
-      assert.strictEqual(kimiResolved.apiKey, 'sk-kimi-key');
-
-      // 2. 测试 qwen 厂商映射
-      const qwenResolved = resolveModelEndpoint('qwen', { apiKey: 'sk-qwen-key' });
-      assert.strictEqual(qwenResolved.baseURL, 'https://dashscope.aliyuncs.com/compatible-mode/v1');
-      assert.strictEqual(qwenResolved.model, 'qwen-plus');
-
-      // 3. 测试 deepseek 厂商映射
-      const dsResolved = resolveModelEndpoint('deepseek', { apiKey: 'sk-ds-key' });
-      assert.strictEqual(dsResolved.baseURL, 'https://api.deepseek.com/v1');
-      assert.strictEqual(dsResolved.model, 'deepseek-chat');
-
-      // 4. 测试自定义 Provider (use: KimiProvider)
-      class KimiProvider {}
-      const customKimiResolved = resolveModelEndpoint(undefined, { use: KimiProvider, apiKey: 'sk-custom' });
-      assert.strictEqual(customKimiResolved.baseURL, 'https://api.moonshot.cn/v1');
-      assert.strictEqual(customKimiResolved.model, 'kimi-k2.6');
-
-      // 5. 测试显式配置优先
-      const explicitResolved = resolveModelEndpoint('kimi', {
-        baseURL: 'https://my-custom-proxy.internal/v1',
-        model: 'custom-kimi-model',
-        apiKey: 'sk-explicit',
-      });
-      assert.strictEqual(explicitResolved.baseURL, 'https://my-custom-proxy.internal/v1');
-      assert.strictEqual(explicitResolved.model, 'custom-kimi-model');
-
-      // 6. 测试 planner.getModel 正常创建 ChatOpenAI 实例并装配客户端配置
-      const mockConfig = {
-        get(key) {
-          if (key === 'ai.llm') {
-            return {
-              default: 'kimi',
-              models: {
-                kimi: { apiKey: 'sk-real-test' },
-              },
-            };
-          }
-          return undefined;
-        },
-      };
-      const planner = new LangChainPlannerService(mockConfig);
-      const model = planner.getModel();
+    it('getModel 应用显式模型配置并去掉 baseURL 的尾斜杠', () => {
+      const mockConfig = { get: key => key === 'ai.llm' ? {
+        default: 'kimi',
+        models: { kimi: {
+          provider: 'openai-compatible',
+          baseURL: 'https://api.moonshot.cn/v1/',
+          model: 'kimi-k2.6',
+          apiKey: 'sk-real-test',
+        } },
+      } : undefined };
+      const model = new LangChainPlannerService(mockConfig).getModel();
       assert.strictEqual(model.clientConfig.baseURL, 'https://api.moonshot.cn/v1');
       assert.strictEqual(model.clientConfig.apiKey, 'sk-real-test');
       assert.strictEqual(model.model, 'kimi-k2.6');
@@ -400,20 +367,11 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
 
       const mockExecutor = new ExecutorService(mockSkills, mockTools);
 
-      const mockTraceStore = {
-        runs: new Map(),
-      };
-      const mockTrace = {
-        async createRun(agent, input, threadId) {
-          const run = { runId: 'run-uuid-1', agent, input, threadId, steps: [], createdAt: '', updatedAt: '' };
-          mockTraceStore.runs.set(run.runId, run);
-          return run;
-        },
-        async addStep(runId, step) {
-          const run = mockTraceStore.runs.get(runId);
-          if (run) run.steps.push(step);
-        },
-      };
+      const records = new Map();
+      const mockTrace = new TraceService({
+        save: async run => records.set(run.runId, structuredClone(run)),
+        load: async id => records.get(id) ?? null,
+      });
 
       const mockThreadService = {
         isThreadEnabled: () => true,
@@ -429,6 +387,7 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
 
       const savedCheckpoints = [];
       const mockCheckpointService = {
+        async runTurn(_id, run) { return run(); },
         async load() { return null; },
         async save(cp) { savedCheckpoints.push(cp); },
       };
@@ -468,7 +427,7 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
       );
 
       // 验证锁死合同三字段 + threadId
-      assert.strictEqual(result.runId, 'run-uuid-1');
+      assert.ok(records.has(result.runId));
       assert.strictEqual(result.output, 'Project A is active');
       assert.strictEqual(result.threadId, 'custom-thread-123');
       assert.ok(Array.isArray(result.steps));
@@ -509,10 +468,11 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
       const mockGuardrail = {
         check: () => ({ safe: false, reason: '包含违禁指令' }),
       };
-      const mockTrace = {
-        createRun: async (a, i, tid) => ({ runId: 'guard-run-1', agent: a, input: i, threadId: tid, steps: [] }),
-        addStep: async () => {},
-      };
+      const records = new Map();
+      const mockTrace = new TraceService({
+        save: async run => records.set(run.runId, structuredClone(run)),
+        load: async id => records.get(id) ?? null,
+      });
       const mockThreadService = {
         isThreadEnabled: () => false,
         ensureThread: () => 't-id',
@@ -562,13 +522,10 @@ describe('T12: lc-lg-runtime · LangChain Planner · LangGraph 循环', () => {
       };
 
       const controller = new AiController(
-        {}, // llm
-        {}, // skills
         {}, // tools
         {}, // agents
         mockOrchestrator,
         {}, // trace
-        {}, // retriever
         {}, // configService
       );
 

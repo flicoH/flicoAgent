@@ -10,6 +10,16 @@ const { GetListDto } = require('../../dist/modules/project/dto/get-list.dto');
 const { ProjectController } = require('../../dist/modules/project/project.controller');
 
 describe('Project DTO 与全局 442 校验', () => {
+  it('按 proj_key 只返回对应项目', () => {
+    const { ProjectService } = require('../../dist/modules/project/project.service');
+    const a = { key: 'a' };
+    const b = { key: 'b' };
+    const projects = new ProjectService({ getModelList: () => [{ project: { a, b } }] });
+    assert.deepStrictEqual(projects.getList({ projKey: 'a' }), [a]);
+    assert.deepStrictEqual(projects.getList({ projKey: 'missing' }), []);
+    assert.deepStrictEqual(projects.getList({}), [a, b]);
+  });
+
   let pipe;
 
   before(async () => {

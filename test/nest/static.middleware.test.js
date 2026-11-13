@@ -15,9 +15,11 @@ describe('站点根静态兜底（不启动服务）', () => {
     const publicPath = path.join(fixture, 'app/public');
     fs.mkdirSync(path.join(publicPath, 'static'), { recursive: true });
     fs.mkdirSync(path.join(publicPath, 'dist/prod/js'), { recursive: true });
+    fs.mkdirSync(path.join(publicPath, 'api/ai/trace'), { recursive: true });
     fs.writeFileSync(path.join(publicPath, 'static/logo.png'), 'business-logo');
     fs.writeFileSync(path.join(publicPath, 'static/business-only.txt'), 'business-only');
     fs.writeFileSync(path.join(publicPath, 'dist/prod/js/example.js'), 'window.STATIC_FIXTURE = true;');
+    fs.writeFileSync(path.join(publicPath, 'api/ai/trace/run-id'), 'private');
     process.chdir(fixture);
     middleware = [];
     agentModule.configureStatic({
@@ -98,7 +100,7 @@ describe('站点根静态兜底（不启动服务）', () => {
   });
 
   it('API 和 View 路径没有对应文件时继续交给 Nest 路由', async () => {
-    for (const url of ['/api/project/list', '/view/dashboard/schema']) {
+    for (const url of ['/api/project/list', '/view/dashboard/schema', '/api/ai/trace/run-id', '/%61pi/ai/trace/run-id']) {
       const response = await request(url);
       assert.strictEqual(response.next, true);
       assert.strictEqual(response.headers.size, 0);

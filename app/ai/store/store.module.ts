@@ -7,6 +7,13 @@ import { FileTraceStore } from './reference/file-trace.store';
 import { FileVectorStore } from './reference/file-vector.store';
 import { FileMemoryStore } from './reference/file-memory.store';
 import { MEMORY_STORE, TRACE_STORE, VECTOR_STORE } from './store.interface';
+import type { MemoryStore, TraceStore, VectorStore } from './store.interface';
+
+/** use 可以是现成存储实例，也可以是接收框架配置的工厂。 */
+function resolveStore<T>(config: ConfigService, kind: string, fallback: () => T): T {
+  const use = config.get<T | ((config: ConfigService) => T)>(`ai.store.${kind}.use`);
+  return typeof use === 'function' ? (use as (config: ConfigService) => T)(config) : use ?? fallback();
+}
 
 /**
  * 存储模块 (StoreModule)
@@ -24,7 +31,7 @@ import { MEMORY_STORE, TRACE_STORE, VECTOR_STORE } from './store.interface';
       provide: TRACE_STORE,
       // 使用工厂根据 ai.store.trace 配置动态创建 FileTraceStore 实例
       useFactory: (config: ConfigService) => (
-        new FileTraceStore(resolveTraceStorePath(config))
+        resolveStore<TraceStore>(config, 'trace', () => new FileTraceStore(resolveTraceStorePath(config)))
       ),
       inject: [ConfigService],
     },
@@ -32,7 +39,7 @@ import { MEMORY_STORE, TRACE_STORE, VECTOR_STORE } from './store.interface';
       provide: VECTOR_STORE,
       // 使用工厂根据 ai.store.vector 配置动态创建 FileVectorStore 实例
       useFactory: (config: ConfigService) => (
-        new FileVectorStore(resolveVectorStorePath(config))
+        resolveStore<VectorStore>(config, 'vector', () => new FileVectorStore(resolveVectorStorePath(config)))
       ),
       inject: [ConfigService],
     },
@@ -40,7 +47,7 @@ import { MEMORY_STORE, TRACE_STORE, VECTOR_STORE } from './store.interface';
       provide: MEMORY_STORE,
       // 使用工厂根据 ai.store.memory.path 配置动态创建 FileMemoryStore 实例
       useFactory: (config: ConfigService) => (
-        new FileMemoryStore(resolveMemoryPath(config))
+        resolveStore<MemoryStore>(config, 'memory', () => new FileMemoryStore(resolveMemoryPath(config)))
       ),
       inject: [ConfigService],
     },

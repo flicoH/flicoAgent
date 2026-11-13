@@ -105,19 +105,15 @@ describe('query/body 统一参数质检（不启动服务）', () => {
   });
 
   it('query/body 失败状态和响应字段与 1.0 中间件一致', async () => {
-    for (const [type, metatype, schema, value] of [
-      ['query', ListQueryDto, { type: 'object', properties: { page: { type: 'string' }, size: { type: 'string' } }, required: ['page', 'size'] }, { page: '1' }],
-      ['body', ProductBodyDto, { type: 'object', properties: { product_name: { type: 'string' }, inventory: { type: 'number' } }, required: ['product_name'] }, { product_name: '商品', inventory: '12' }],
+    // Koa 中间件已移除，直接验证兼容约定的响应合同。
+    for (const [type, metatype, value] of [
+      ['query', ListQueryDto, { page: '1' }],
+      ['body', ProductBodyDto, { product_name: '商品', inventory: '12' }],
     ]) {
-      const ctx = { path: '/api/validation-fixture', method: type === 'query' ? 'GET' : 'POST', request: { [type]: value, headers: {} } };
-      const app = { logger: { info() {} }, routerSchema: { [ctx.path]: { [ctx.method.toLowerCase()]: { [type]: schema } } } };
-      await legacyMiddleware(app)(ctx, () => assert.fail('无效请求不能进入下一步'));
       const body = await failure(value, type, metatype);
-      assert.strictEqual(ctx.status, 200);
-      assert.deepStrictEqual(Object.keys(body), Object.keys(ctx.body));
-      assert.strictEqual(body.success, ctx.body.success);
-      assert.strictEqual(body.code, ctx.body.code);
-      assert(ctx.body.message.startsWith('request validate fail:'));
+      assert.deepStrictEqual({ ...body, message: body.message.split(':')[0] }, {
+        success: false, message: 'request validate fail', code: 442,
+      });
     }
   });
 });

@@ -42,6 +42,8 @@ function isAgentDefinition(value: unknown): value is AgentDefinition {
     && agent.skills.every(item => typeof item === 'string')
     && Array.isArray(agent.tools)
     && agent.tools.every(item => typeof item === 'string')
+    && (agent.delegates === undefined || (Array.isArray(agent.delegates)
+      && agent.delegates.every(item => typeof item === 'string' && Boolean(item))))
     && (agent.prompt === undefined || typeof agent.prompt === 'string')
     && (agent.promptFile === undefined || typeof agent.promptFile === 'string')
     && (agent.model === undefined || typeof agent.model === 'string');

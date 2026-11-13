@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { ConfigService } from '../../config/config.service';
-import { LlmMessage } from '../llm/llm.interface';
+import { LlmMessage } from '../contracts';
 import { MemoryEntry, ThreadCheckpoint } from '../store/store.interface';
 import { resolveMemoryMaxTurns, resolveThreadEnabled } from './internal/load-memory-config';
 

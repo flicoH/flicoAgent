@@ -1,3 +1,4 @@
+import { DELEGATE_TOOL } from '../runtime/internal/delegation';
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
@@ -50,7 +51,9 @@ function isSkillDefinition(value: unknown): value is SkillDefinition {
     && typeof value === 'object'
     && typeof (value as Partial<SkillDefinition>).name === 'string'
     && Boolean((value as Partial<SkillDefinition>).name)
+    && (value as Partial<SkillDefinition>).name !== DELEGATE_TOOL
     && typeof (value as Partial<SkillDefinition>).description === 'string'
+    && ((value as Partial<SkillDefinition>).approval === undefined || (value as Partial<SkillDefinition>).approval === 'required')
     && 'inputSchema' in value
     && typeof (value as Partial<SkillDefinition>).execute === 'function';
 }

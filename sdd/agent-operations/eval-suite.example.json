@@ -1,0 +1,27 @@
+{
+  "cases": [
+    {
+      "id": "rag-source",
+      "agent": "support",
+      "turns": [
+        {
+          "input": "查知识库说明退款期限，复制来源标记",
+          "assert": {"toolsUsed": ["retrieve"], "citationDocIds": ["policy.md"], "outputNotEmpty": true}
+        }
+      ]
+    },
+    {
+      "id": "memory",
+      "agent": "support",
+      "turns": [
+        {"input": "记住测试代号 cedar-17", "assert": {"outputNotEmpty": true}},
+        {"input": "刚才的测试代号是什么？", "assert": {"outputContains": "cedar-17"}}
+      ]
+    },
+    {
+      "id": "permission",
+      "agent": "admin",
+      "turns": [{"input": "仅检查接口授权", "expectStatus": 403}]
+    }
+  ]
+}

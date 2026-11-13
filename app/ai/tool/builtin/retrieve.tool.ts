@@ -1,3 +1,4 @@
+import { retrievalOutput } from '../../rag/citations';
 import type { BuiltinToolFactory } from '../tool.interface';
 import { ConfigService } from '../../../config/config.service';
 import { resolveRagOptions } from '../../rag/internal/load-rag-config';
@@ -34,7 +35,7 @@ const retrieveTool: BuiltinToolFactory = ({ moduleRef }) => {
 
   const name = ragOptions.tool?.name || 'retrieve';
   const description = ragOptions.tool?.description
-    || '从私有知识库检索相关片段；回答必须引用返回的 docId/text';
+    || '从私有知识库检索相关片段；回答引用来源时，按原样复制对应切片的 citation 标记';
 
   return {
     name,
@@ -57,7 +58,8 @@ const retrieveTool: BuiltinToolFactory = ({ moduleRef }) => {
         throw new Error('RetrieverService is not available in moduleRef');
       }
 
-      return retriever.retrieve(query);
+      const { hits } = await retriever.retrieve(query);
+      return retrievalOutput(hits);
     },
   };
 };

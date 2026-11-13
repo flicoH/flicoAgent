@@ -7,7 +7,6 @@ import { McpServerConfig, McpToolDescriptor } from './mcp.types';
 interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
-  timer: NodeJS.Timeout;
 }
 
 /**
@@ -110,11 +109,11 @@ export class McpClient {
    * @param args 工具入参
    * @returns 工具调用结果
    */
-  async callTool(name: string, args?: unknown): Promise<unknown> {
+  async callTool(name: string, args?: unknown, signal?: AbortSignal): Promise<unknown> {
     return this.sendRequest('tools/call', {
       name,
       arguments: args ?? {},
-    });
+    }, signal);
   }
 
   /**
@@ -142,7 +141,8 @@ export class McpClient {
   /**
    * 发送带 id 的 JSON-RPC 请求并等待对应响应
    */
-  private async sendRequest(method: string, params?: unknown): Promise<unknown> {
+  private async sendRequest(method: string, params?: unknown, signal?: AbortSignal): Promise<unknown> {
+    signal?.throwIfAborted();
     if (this.isClosed) {
       throw new Error(`MCP server "${this.name}" client is closed`);
     }
@@ -150,10 +150,10 @@ export class McpClient {
     const id = this.nextId++;
 
     if (this.config.command) {
-      return this.sendStdioRequest(id, method, params);
+      return this.sendStdioRequest(id, method, params, signal);
     }
     if (this.config.url) {
-      return this.sendHttpRequest(id, method, params);
+      return this.sendHttpRequest(id, method, params, signal);
     }
 
     throw new Error(`MCP server "${this.name}" has no valid transport`);
@@ -259,8 +259,6 @@ export class McpClient {
       if (msg && typeof msg === 'object' && msg.id !== undefined) {
         const pending = this.pendingRequests.get(msg.id);
         if (pending) {
-          this.pendingRequests.delete(msg.id);
-          clearTimeout(pending.timer);
           if (msg.error) {
             const errText = msg.error.message || JSON.stringify(msg.error);
             pending.reject(new Error(`MCP server "${this.name}" error: ${errText}`));
@@ -278,25 +276,38 @@ export class McpClient {
   private handleProcessTermination(err: Error): void {
     this.isConnected = false;
     for (const [, req] of this.pendingRequests.entries()) {
-      clearTimeout(req.timer);
       req.reject(err);
     }
     this.pendingRequests.clear();
   }
 
-  private sendStdioRequest(id: number | string, method: string, params?: unknown): Promise<unknown> {
+  private sendStdioRequest(id: number | string, method: string, params?: unknown, signal?: AbortSignal): Promise<unknown> {
     if (!this.child || !this.child.stdin || this.child.stdin.destroyed) {
       throw new Error(`MCP server "${this.name}" process is not running or stdin is closed`);
     }
 
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const cleanup = () => {
+        clearTimeout(timer);
         this.pendingRequests.delete(id);
-        reject(new Error(`MCP request "${method}" to server "${this.name}" timed out after ${this.timeoutMs}ms`));
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const fail = (error: Error) => {
+        cleanup();
+        reject(error);
+      };
+      // stdio 子进程由所有会话共享。断连取消这一条等待，并忽略远端迟到的响应。
+      const onAbort = () => fail(signal!.reason);
+      const timer = setTimeout(() => {
+        fail(new Error(`MCP request "${method}" to server "${this.name}" timed out after ${this.timeoutMs}ms`));
       }, this.timeoutMs);
 
       // 先登记回调再写入 stdin，避免响应先到而找不到等待者。
-      this.pendingRequests.set(id, { resolve, reject, timer });
+      this.pendingRequests.set(id, {
+        resolve: value => { cleanup(); resolve(value); },
+        reject: fail,
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
 
       // 换行分隔 JSON-RPC，write 末尾带 '\n'，严禁 Content-Length 帧
       const payload = JSON.stringify({
@@ -308,9 +319,7 @@ export class McpClient {
 
       this.child!.stdin!.write(payload, (writeErr) => {
         if (writeErr) {
-          clearTimeout(timer);
-          this.pendingRequests.delete(id);
-          reject(new Error(`Failed to write to MCP server "${this.name}" stdin: ${writeErr.message}`));
+          fail(new Error(`Failed to write to MCP server "${this.name}" stdin: ${writeErr.message}`));
         }
       });
     });
@@ -357,7 +366,7 @@ export class McpClient {
     this.sessionId = undefined;
   }
 
-  private async sendHttpRequest(id: number | string, method: string, params?: unknown): Promise<unknown> {
+  private async sendHttpRequest(id: number | string, method: string, params?: unknown, signal?: AbortSignal): Promise<unknown> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept': 'application/json, text/event-stream',
@@ -385,7 +394,7 @@ export class McpClient {
         method: 'POST',
         headers,
         body,
-        signal: controller.signal,
+        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
       });
 
       // initialize 响应若有 mcp-session-id，后续请求回传该头
@@ -412,6 +421,7 @@ export class McpClient {
 
       return responseMsg.result;
     } catch (err: any) {
+      signal?.throwIfAborted();
       if (err.name === 'AbortError' || controller.signal.aborted) {
         throw new Error(`MCP request "${method}" to server "${this.name}" timed out after ${this.timeoutMs}ms`);
       }

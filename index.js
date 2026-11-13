@@ -9,11 +9,6 @@
  * @LastEditTime: 2026-09-15 11:08:41
  */
 
-// 引入编译后的 Nest 启动入口
-const { bootstrap } = require('./dist/main')
-// 引入前端工程化方法
-const FEBuildDev = require('./app/vite/dev.js')
-const FEBuildProd = require('./app/vite/prod.js')
 // 引入评测断言纯函数
 const assertions = require('./dist/ai/eval/assertions')
 
@@ -27,10 +22,11 @@ module.exports = {
    * @param {string} evn 环境 dev/prod
    */
   frontendBuild(env) {
+    // 后端启动和断言调用不需要加载 Vite 或扫描前端入口。
     if (env === 'local') {
-      FEBuildDev()
+      return require('./app/vite/dev.js')()
     } else if (env === 'production') {
-      FEBuildProd()
+      return require('./app/vite/prod.js')()
     }
   },
 
@@ -39,6 +35,12 @@ module.exports = {
    * @param  options 项目配置，透传给 Nest
    */
   serverStart(options = {}) {
-    return bootstrap(options)
+    return require('./dist/main').bootstrap(options)
   }
 }
+
+const { APP_GUARD, Reflector, RagModule, RetrieverService } = require('./dist/nest-public')
+module.exports.APP_GUARD = APP_GUARD
+module.exports.Reflector = Reflector
+module.exports.RagModule = RagModule
+module.exports.RetrieverService = RetrieverService

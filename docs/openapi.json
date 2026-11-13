@@ -1,0 +1,782 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "flicoAgent AI HTTP API", "version": "1.0.1"},
+  "security": [
+    {"signature": [], "timestamp": [], "keyId": [], "nonce": []},
+    {"signature": [], "timestamp": [], "session": []}
+  ],
+  "paths": {
+    "/api/ai/agent/runs": {
+      "get": {
+        "summary": "分页查询运行",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            "required": false
+          },
+          {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}, "required": false}
+        ],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "limit": {"type": "integer", "minimum": 0},
+                        "offset": {"type": "integer", "minimum": 0},
+                        "items": {"type": "array", "items": {"$ref": "#/components/schemas/RunSummary"}}
+                      },
+                      "required": ["limit", "offset", "items"]
+                    }
+                  },
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "400": {"description": "分页参数无效。"}
+        }
+      },
+      "post": {
+        "summary": "异步提交 Agent 运行",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentRunRequest"}}}},
+        "responses": {
+          "202": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RunSummary"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"},
+          "404": {"description": "Agent 未注册。"},
+          "429": {"description": "后台运行队列已满，可稍后重试。"}
+        }
+      }
+    },
+    "/api/ai/agent/runs/{runId}": {
+      "get": {
+        "summary": "查询运行详情",
+        "parameters": [{"name": "runId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {"allOf": [{"$ref": "#/components/schemas/RunSummary"}, {"$ref": "#/components/schemas/RunResult"}]}
+                  },
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "404": {"description": "运行不存在或无权访问。"}
+        }
+      }
+    },
+    "/api/ai/agent/runs/{runId}/events": {
+      "get": {
+        "summary": "订阅按 ID 持久化的运行",
+        "description": "断开订阅不取消后台运行。",
+        "parameters": [
+          {"name": "runId", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "after", "in": "query", "schema": {"type": "integer", "minimum": 0}, "required": false}
+        ],
+        "responses": {
+          "200": {
+            "description": "start → step（带 sequence）/ status → done。事件数据是 JSON。",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}}
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "404": {"description": "运行不存在或无权访问。"},
+          "400": {"description": "步骤序号无效。"}
+        }
+      }
+    },
+    "/api/ai/agent/runs/{runId}/cancel": {
+      "post": {
+        "summary": "取消运行",
+        "parameters": [{"name": "runId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RunSummary"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "404": {"description": "运行不存在或无权访问。"},
+          "409": {"description": "运行已进入其他终态。"}
+        }
+      }
+    },
+    "/api/ai/agent/runs/{runId}/approval": {
+      "post": {
+        "summary": "批准或拒绝一个待批调用",
+        "parameters": [{"name": "runId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {"approvalId": {"type": "string", "format": "uuid"}, "approved": {"type": "boolean"}},
+                "required": ["approvalId", "approved"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RunSummary"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"},
+          "404": {"description": "运行不存在或无权访问。"},
+          "409": {"description": "审批 ID 已失效或已被处理。"},
+          "429": {"description": "后台运行队列已满，可稍后重试。"}
+        }
+      }
+    },
+    "/api/ai/rag/documents": {
+      "get": {
+        "summary": "列出知识库索引中的文档",
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {"docId": {"type": "string"}, "chunks": {"type": "integer", "minimum": 0}},
+                        "required": ["docId", "chunks"]
+                      }
+                    }
+                  },
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"}
+        }
+      },
+      "delete": {
+        "summary": "删除文档的索引切片",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {"schema": {"type": "object", "properties": {"docId": {"type": "string", "maxLength": 1024}}, "required": ["docId"]}}
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {
+                      "type": "object",
+                      "properties": {"docId": {"type": "string"}, "removed": {"type": "integer", "minimum": 0}},
+                      "required": ["docId", "removed"]
+                    }
+                  },
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"},
+          "404": {"description": "文档未建立索引。"}
+        }
+      }
+    },
+    "/api/ai/rag/rebuild": {
+      "post": {
+        "summary": "从配置目录重建知识库索引",
+        "responses": {
+          "201": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RagIngestResult"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"}
+        }
+      }
+    },
+    "/api/ai/rag/preview": {
+      "post": {
+        "summary": "预览知识库检索结果",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {"query": {"type": "string", "maxLength": 4096}, "topK": {"type": "integer", "minimum": 1, "maximum": 100}},
+                "required": ["query"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {
+                      "type": "object",
+                      "properties": {"hits": {"type": "array", "items": {"$ref": "#/components/schemas/RagHit"}}},
+                      "required": ["hits"]
+                    }
+                  },
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"}
+        }
+      }
+    },
+    "/api/ai/rag/chunk": {
+      "get": {
+        "summary": "按引用的 chunkId 定位切片",
+        "parameters": [{"name": "id", "in": "query", "schema": {"type": "string"}, "required": true}],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RagHit"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"},
+          "404": {"description": "切片不存在。"}
+        }
+      }
+    },
+    "/api/ai/chat": {
+      "post": {
+        "summary": "模型对话",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "成功。",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatResult"}}}
+          },
+          "200": {
+            "description": "框架级业务错误。",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"},
+          "400": {"description": "缺少有效消息或消息结构错误。"}
+        }
+      }
+    },
+    "/api/ai/chat/stream": {
+      "post": {
+        "summary": "流式模型对话",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ChatRequest"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "delta → done，或 error。事件数据是 JSON。",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}}
+          },
+          "200": {
+            "description": "请求 DTO 校验或框架级失败，返回业务错误。",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"},
+          "400": {"description": "消息结构错误。"}
+        }
+      }
+    },
+    "/api/ai/agent/run": {
+      "post": {
+        "summary": "运行 Agent",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentRunRequest"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RunResult"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "框架级业务错误。",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"},
+          "400": {"description": "缺少输入。"},
+          "403": {"description": "无权运行该 Agent。"},
+          "404": {"description": "Agent 未注册。"}
+        }
+      }
+    },
+    "/api/ai/agent/run/stream": {
+      "post": {
+        "summary": "流式运行 Agent",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AgentRunRequest"}}}
+        },
+        "responses": {
+          "201": {
+            "description": "start、step、delta、delta_reset、done 或 error。delta_reset 清除当前回答的临时文本，done 的数据与同步接口相同。",
+            "content": {"text/event-stream": {"schema": {"type": "string"}}}
+          },
+          "200": {
+            "description": "请求 DTO 校验或框架级失败，返回业务错误。",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"},
+          "400": {"description": "缺少输入。"},
+          "403": {"description": "无权运行该 Agent。"}
+        }
+      }
+    },
+    "/api/ai/agent/graph": {
+      "get": {
+        "summary": "读取执行图拓扑",
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Graph"}}}
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"}
+        }
+      }
+    },
+    "/api/ai/agent/list": {
+      "get": {
+        "summary": "列出当前可用的 Agent",
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Agent"}}}
+            }
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"}
+        }
+      }
+    },
+    "/api/ai/tool/list": {
+      "get": {
+        "summary": "列出已注册工具",
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Tool"}}}
+            }
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"}
+        }
+      }
+    },
+    "/api/ai/trace/{runId}": {
+      "get": {
+        "summary": "读取授权范围内的 Trace",
+        "parameters": [
+          {
+            "name": "runId",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$"}
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/Trace"}},
+                      "required": ["success", "data"]
+                    },
+                    {"$ref": "#/components/schemas/Error"}
+                  ]
+                }
+              }
+            }
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"}
+        }
+      }
+    },
+    "/api/ai/skill/{name}/invoke": {
+      "post": {
+        "summary": "直接调用 Skill",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {}}}},
+        "responses": {
+          "201": {"description": "成功。", "content": {"application/json": {"schema": {}}}},
+          "200": {
+            "description": "框架级业务错误。",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Error"}}}
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"},
+          "400": {"description": "参数不符合 Skill 的 JSON Schema。"},
+          "403": {"description": "无权直接调用该 Skill。"}
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "signature": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "s_sign",
+        "description": "浏览器会话模式使用兼容签名，服务间调用使用 HMAC-SHA256。"
+      },
+      "timestamp": {"type": "apiKey", "in": "header", "name": "s_t", "description": "13 位 Unix 毫秒时间戳。"},
+      "keyId": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-agent-key-id",
+        "description": "服务间调用方的 key ID。"
+      },
+      "nonce": {"type": "apiKey", "in": "header", "name": "x-agent-nonce", "description": "每个服务间请求的唯一随机值。"},
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "session",
+        "description": "示意名称，实际 Cookie 或会话凭据由业务授权回调验证。"
+      }
+    },
+    "schemas": {
+      "Citation": {
+        "type": "object",
+        "properties": {"ref": {"type": "string"}, "docId": {"type": "string"}, "chunkId": {"type": "string"}, "score": {"type": "number"}},
+        "required": ["ref", "docId", "chunkId", "score"]
+      },
+      "PendingApproval": {
+        "type": "object",
+        "properties": {"id": {"type": "string", "format": "uuid"}, "kind": {"enum": ["skill", "tool"]}, "name": {"type": "string"}, "input": {}},
+        "required": ["id", "kind", "name", "input"]
+      },
+      "RunSummary": {
+        "type": "object",
+        "properties": {
+          "runId": {"type": "string"},
+          "agent": {"type": "string"},
+          "threadId": {"type": "string"},
+          "status": {"enum": ["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "interrupted"]},
+          "createdAt": {"type": "string", "format": "date-time"},
+          "updatedAt": {"type": "string", "format": "date-time"},
+          "usage": {"$ref": "#/components/schemas/TokenUsage"},
+          "modelDurationMs": {"type": "integer", "minimum": 0},
+          "failure": {"$ref": "#/components/schemas/StepError"},
+          "parentRunId": {"type": "string"},
+          "rootRunId": {"type": "string"}
+        },
+        "required": ["runId", "agent", "threadId", "status", "createdAt", "updatedAt"]
+      },
+      "RagHit": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "docId": {"type": "string"},
+          "text": {"type": "string"},
+          "score": {"type": "number"},
+          "citation": {"type": "string"},
+          "meta": {"type": "object"}
+        },
+        "required": ["id", "docId", "text", "score", "citation"]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {"success": {"const": false}, "message": {"type": "string"}, "code": {"type": "integer"}},
+        "required": ["success", "message", "code"]
+      },
+      "ChatRequest": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "messages": {"type": "array", "items": {"$ref": "#/components/schemas/ChatMessage"}, "minItems": 1},
+          "model": {"type": "string", "maxLength": 128},
+          "tools": {"type": "array", "items": {}}
+        },
+        "anyOf": [{"required": ["message"]}, {"required": ["messages"]}]
+      },
+      "ChatMessage": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {"role": {"enum": ["user", "system"]}, "content": {"type": "string"}},
+            "required": ["role", "content"]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "role": {"const": "assistant"},
+              "content": {"type": ["string", "null"]},
+              "tool_calls": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {"type": "string"},
+                    "type": {"const": "function"},
+                    "function": {
+                      "type": "object",
+                      "properties": {"name": {"type": "string"}, "arguments": {"type": "string"}},
+                      "required": ["name", "arguments"]
+                    }
+                  },
+                  "required": ["id", "type", "function"]
+                }
+              }
+            },
+            "required": ["role", "content"]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "role": {"const": "tool"},
+              "content": {"type": "string"},
+              "tool_call_id": {"type": "string"}
+            },
+            "required": ["role", "content", "tool_call_id"]
+          }
+        ]
+      },
+      "TokenUsage": {
+        "type": "object",
+        "properties": {
+          "inputTokens": {"type": "integer", "minimum": 0},
+          "outputTokens": {"type": "integer", "minimum": 0},
+          "totalTokens": {"type": "integer", "minimum": 0}
+        },
+        "required": ["inputTokens", "outputTokens", "totalTokens"]
+      },
+      "ChatResult": {
+        "type": "object",
+        "properties": {"usage": {"$ref": "#/components/schemas/TokenUsage"}, "output": {"type": "string"}, "message": {"$ref": "#/components/schemas/ChatMessage"}},
+        "required": ["output"]
+      },
+      "AgentRunRequest": {
+        "type": "object",
+        "properties": {
+          "agent": {"type": "string", "minLength": 1, "maxLength": 128},
+          "input": {},
+          "threadId": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$"}
+        },
+        "required": ["agent", "input"]
+      },
+      "RunResult": {
+        "type": "object",
+        "properties": {
+              "status": {"enum": ["queued", "running", "waiting_approval", "succeeded", "failed", "cancelled", "interrupted"]},
+              "failure": {"$ref": "#/components/schemas/StepError"},
+              "approval": {"$ref": "#/components/schemas/PendingApproval"},
+              "modelDurationMs": {"type": "integer", "minimum": 0},
+              "citations": {"type": "array", "items": {"$ref": "#/components/schemas/Citation"}},
+          "usage": {"$ref": "#/components/schemas/TokenUsage"},
+          "runId": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$"},
+          "threadId": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$"},
+          "output": {"type": "string"},
+          "steps": {"type": "array", "items": {"$ref": "#/components/schemas/Step"}}
+        },
+        "required": ["runId", "threadId", "output", "steps"]
+      },
+      "Trace": {
+        "allOf": [
+          {"$ref": "#/components/schemas/RunResult"},
+          {
+            "type": "object",
+            "properties": {
+              "agent": {"type": "string"},
+              "input": {},
+              "parentRunId": {"type": "string"},
+              "rootRunId": {"type": "string"},
+              "createdAt": {"type": "string", "format": "date-time"},
+              "updatedAt": {"type": "string", "format": "date-time"}
+            },
+            "required": ["agent", "input", "createdAt", "updatedAt"]
+          }
+        ]
+      },
+      "Step": {
+        "type": "object",
+        "properties": {
+          "usage": {"$ref": "#/components/schemas/TokenUsage"},
+          "type": {"enum": ["plan", "skill", "tool", "observe", "final", "guardrail", "approval"]},
+          "iteration": {"type": "integer"},
+          "name": {"type": "string"},
+          "source": {"enum": ["builtin", "mcp"]},
+          "input": {},
+          "output": {},
+          "error": {"$ref": "#/components/schemas/StepError"},
+          "childRunId": {"type": "string"},
+          "citations": {"type": "array", "items": {"$ref": "#/components/schemas/Citation"}},
+          "modelDurationMs": {"type": "integer", "minimum": 0},
+          "toolCallId": {"type": "string"},
+          "timestamp": {"type": "string", "format": "date-time"},
+          "node": {"enum": ["plan", "execute", "observe"]},
+          "planner": {"const": "langchain"}
+        },
+        "required": ["type", "iteration", "timestamp"]
+      },
+      "StepError": {
+        "type": "object",
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}},
+        "required": ["code", "message"]
+      },
+      "RagIngestResult": {
+        "type": "object",
+        "properties": {
+          "ingested": {"type": "integer"},
+          "chunks": {"type": "integer"},
+          "succeeded": {"type": "array", "items": {"type": "string"}},
+          "skipped": {"type": "array", "items": {"type": "string"}},
+          "failed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {"docId": {"type": "string"}, "stage": {"enum": ["read", "embed"]}},
+              "required": ["docId", "stage"]
+            }
+          }
+        },
+        "required": ["ingested", "chunks", "succeeded", "skipped", "failed"]
+      },
+      "Tool": {
+        "type": "object",
+        "properties": {
+          "approval": {"const": "required"},
+          "name": {"type": "string"},
+          "description": {"type": "string"},
+          "inputSchema": {},
+          "source": {"enum": ["builtin", "mcp"]}
+        },
+        "required": ["name", "description", "inputSchema"]
+      },
+      "Agent": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "skills": {"type": "array", "items": {"type": "string"}},
+          "tools": {"type": "array", "items": {"type": "string"}},
+          "prompt": {"type": "string"},
+          "promptFile": {"type": "string"},
+          "delegates": {"type": "array", "items": {"type": "string"}},
+          "model": {"type": "string"}
+        },
+        "required": ["name", "skills", "tools"]
+      },
+      "Graph": {
+        "type": "object",
+        "properties": {
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {"id": {"type": "string"}, "name": {"type": "string"}},
+              "required": ["id", "name"]
+            }
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "source": {"type": "string"},
+                "target": {"type": "string"},
+                "conditional": {"type": "boolean"}
+              },
+              "required": ["source", "target", "conditional"]
+            }
+          }
+        },
+        "required": ["nodes", "edges"]
+      }
+    }
+  }
+}

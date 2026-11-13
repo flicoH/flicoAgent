@@ -15,10 +15,10 @@ flicoAgent 是一个基于 NestJS 的应用框架内核，提供项目配置、�
 
 ## 从 GitHub 克隆并运行
 
-需要 Node.js 22.22.3（仓库的 `.nvmrc` 指定版本）和 npm 10。将下方的 `OWNER/REPO` 替换为发布后的 GitHub 仓库路径。如果发布在其他分支，将 `feature/agent` 改为对应分支名。
+需要 Node.js 22.22.3（仓库的 `.nvmrc` 指定版本）和 npm 10。
 
 ```bash
-git clone --branch feature/agent https://github.com/OWNER/REPO.git elips
+git clone --branch feature/agent https://github.com/flicoH/flicoAgent
 cd elips
 nvm install  # 使用 nvm 时执行，读取 .nvmrc
 nvm use      # 已使用指定 Node.js 版本时可跳过两条 nvm 命令
@@ -169,9 +169,34 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 - 页面控制器通过 `/view/:page` 查找业务工程 `app/public/dist/entry.:page.tpl` 模板。
 - 静态资源从业务工程 `app/public/` 提供。
 - 内置项目 API 路径包括 `/api/project`、`/api/project/list` 和 `/api/project/model_list`。
-- `/api/*` 默认需要请求头 `s_sign` 与 `s_t` 验签。可通过 `apiSignVerify.whiteList` 将明确的 API 路径加入白名单。页面请求不受该 API 验签守卫影响。
+- 项目及业务 API 沿用 `s_sign` 与 `s_t`。`apiSignVerify.whiteList` 可配置业务 API 免签路径。
+- AI API 使用独立授权，接口契约见 [OpenAPI](docs/openapi.json)。运行管理、知识库、审批、委派和 CI 接入见 [Agent 运维能力接入](docs/agent-operations.md)。
 
 页面模板和业务路由的具体数据依赖业务工程配置及产物；单独克隆本框架不会自带业务项目数据或数据库内容。
+
+### 接入 AI API
+
+浏览器继续使用现有签名头。业务工程配置 `ai.access.authorize(request)`，由回调验证真实登录会话，并返回 `{ scope, agents?, skills?, ingest? }`。`scope` 由服务端生成，用于隔离会话与 Trace。可用 `agents` 限制可运行的 Agent，用 `skills` 限制可直调的 Skill。回调返回 `null` 时请求被拒绝。
+
+服务间调用在服务端配置 `ai.access.keys.<keyId>`，值为 `{ secret, scope?, agents?, skills?, ingest? }`。客户端发送以下请求头。
+
+| 请求头 | 值 |
+| --- | --- |
+| `x-agent-key-id` | 调用方 key ID |
+| `x-agent-nonce` | 每个请求唯一的随机值，例如 UUID |
+| `s_t` | 13 位 Unix 毫秒时间戳 |
+| `s_sign` | 下述消息的 HMAC-SHA256 十六进制值 |
+
+待签名消息由 key ID、大写 HTTP 方法、请求路径及原始查询串、`s_t`、nonce、原始请求体的 SHA-256 十六进制值依次以换行连接。空正文按空字节串计算摘要。签名允许 5 分钟时钟偏差，nonce 在单个进程内防重放。多实例部署可在网关统一校验 nonce。
+
+历史 HTTP 会话和 Trace 缺少授权归属，需要由业务按明确的归属迁移。Trace 存储记录增加 `scope`。会话存储键为 `scope-` 加 `JSON.stringify([scope, threadId])` 的 SHA-256 十六进制值。
+
+### SSE 和存储
+
+- Agent 流发送 `start`、`step`、`delta`，成功时以 `done` 收尾。收到 `delta_reset` 时清空当前回答的临时文本，继续保留步骤。Chat 流发送 `delta` 与 `done`。响应开始后的失败以 `error` 事件返回，连接空闲时会发送心跳。
+- Skill 与 Tool 的 `inputSchema` 在执行前校验。`ai.tools.serviceInvoke` 以服务名为键，以开放的方法名数组为值。例如 `{ ProjectService: ['getProjectDetail'] }`。
+- `ai.store.trace.use`、`ai.store.memory.use`、`ai.store.vector.use` 接受存储实例或接收 `ConfigService` 的工厂。跨实例会话存储可实现 `MemoryStore.runTurn`，用共享锁协调同一线程。默认文件存储适用于单实例。
+- `/api/ai/rag/ingest` 需要 `ingest: true`。路径应在 `ai.store.vector.fixturesPath` 或 `ai.rag.fixtures.path` 配置的目录下，默认根目录为 `data/fixtures`。灌库同步选定目录的切片，保留处理失败文档的上次结果。自定义向量存储需要实现 `syncDirectory` 才能使用灌库接口。
 
 ## npm 脚本
 
@@ -211,3 +236,9 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 ## License
 
 本项目 `package.json` 声明的许可证为 ISC。发布或使用前请确认其与源文件版权声明及项目实际授权一致。
+
+### Token 用量
+
+Agent 同步结果、SSE 的 `done` 以及 Trace 返回可选的 `usage`，字段为 `inputTokens`、`outputTokens`、`totalTokens`。每轮模型调用只记录一次，即使该轮执行多个工具。Trace 的 `plan` 步骤可查看单轮用量。
+
+Chat 同步结果也可返回 `usage`。支持流式用量的 OpenAI 兼容模型可配置 `ai.llm.models.<name>.streamUsage: true`，流式统计随 `done` 返回。上游未报告用量时省略字段。多轮统计只累计已报告的调用，数值可能低于实际消耗。

@@ -1,15 +1,20 @@
 {
   "name": "@flicoh/agent",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "main": "index.js",
   "files": [
     "dist",
     "index.js",
+    "index.d.ts",
+    "nest.d.ts",
     "app",
     "config",
-    "model"
+    "model",
+    "docs/openapi.json"
   ],
+  "bin": { "flico-agent-eval": "./dist/ai/eval/cli.js" },
   "scripts": {
+    "eval": "node dist/ai/eval/cli.js",
     "build": "nest build",
     "build:watch": "nest build --watch",
     "prepublishOnly": "npm run build",
@@ -18,7 +23,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git@git.code.tencent.com:flicoH/flicoH-elips.git"
+    "url": "git@github.com:flicoH/flicoAgent.git"
   },
   "author": "flicoH",
   "license": "ISC",
@@ -85,8 +90,10 @@
   },
   "exports": {
     ".": "./index.js",
+    "./nest": { "types": "./nest.d.ts", "default": "./dist/nest-public.js" },
     "./eval/assertions": "./dist/ai/eval/assertions.js",
     "./assertions": "./dist/ai/eval/assertions.js",
+    "./openapi.json": "./docs/openapi.json",
     "./types/express": "./app/types/express.d.ts",
     "./nest-core": "./dist/nest-core.js",
     "./dist/*.js": "./dist/*.js",

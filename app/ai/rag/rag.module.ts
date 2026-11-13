@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { EmbeddingModule } from '../embedding/embedding.module';
 import { StoreModule } from '../store/store.module';
 import { Chunker } from './chunker';
 import { RetrieverService } from './retriever.service';
@@ -9,10 +8,10 @@ import { RetrieverService } from './retriever.service';
  *
  * 【职责】
  * 组装文档分块 (Chunker) 与知识库检索服务 (RetrieverService)，
- * 依赖底层 StoreModule (VectorStore) 与 EmbeddingModule (EmbeddingGateway)。
+ * 依赖底层 StoreModule (VectorStore)。
  */
 @Module({
-  imports: [StoreModule, EmbeddingModule],
+  imports: [StoreModule],
   providers: [Chunker, RetrieverService],
   exports: [Chunker, RetrieverService],
 })

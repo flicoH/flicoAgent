@@ -60,6 +60,11 @@ export function loadMcpConfig(configService: ConfigService): McpConfig {
       continue;
     }
 
+    if (server.approvalTools !== undefined && (!Array.isArray(server.approvalTools)
+      || server.approvalTools.some(name => typeof name !== 'string' || !name.trim()))) {
+      throw new Error(`MCP server "${name}" has an invalid approvalTools policy`);
+    }
+
     // 保留 name + (command 或 url) 的合法条目
     validServers.push({
       ...server,

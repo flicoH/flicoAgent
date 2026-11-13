@@ -78,8 +78,10 @@ describe('API 验签 Guard（不启动服务）', () => {
     expect445(headers(String(now - 600001)));
   });
 
-  it('保留 1.0 单向超时计算，未来时间戳的正确签名通过', () => {
+  it('允许时间窗内的客户端时钟偏差，拒绝过远的未来和非数字时间戳', () => {
     assert.strictEqual(guard().canActivate(context(undefined, headers(String(now + 1000)))), true);
+    expect445(headers(String(now + 600001)));
+    expect445(headers('not-a-timestamp'));
   });
 
   it('仅 /api/* 校验，页面和相似前缀路径跳过', () => {

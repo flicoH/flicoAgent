@@ -4,7 +4,7 @@ const { McpClient } = require('../../dist/ai/mcp/mcp.client');
 const { McpLoader } = require('../../dist/ai/mcp/mcp.loader');
 const { McpRegistryService } = require('../../dist/ai/mcp/mcp-registry.service');
 const { ToolRegistryService } = require('../../dist/ai/tool/tool-registry.service');
-const { ExecutorService } = require('../../dist/ai/runtime/executor.service');
+const { ExecutorService } = require('../../dist/ai/tool/executor.service');
 
 describe('MCP Client · Loader · Registry · 统一 ToolRegistry', () => {
 

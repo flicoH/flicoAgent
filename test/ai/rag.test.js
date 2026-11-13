@@ -1,10 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios');
-const { resolveEmbeddingProvider } = require('../../dist/ai/embedding/internal/load-embedding-config');
-const { EmbeddingGateway } = require('../../dist/ai/embedding/embedding.gateway');
-const { DashScopeCompatibleEmbeddingProvider } = require('../../dist/ai/embedding/providers/dashscope-compatible');
+const { resolveEmbedder } = require('../../dist/ai/rag/internal/load-embedding-config');
 const { FileVectorStore } = require('../../dist/ai/store/reference/file-vector.store');
 const { resolveRagFixturesPath, resolveRagOptions } = require('../../dist/ai/rag/internal/load-rag-config');
 const { chunk, resolveChunker } = require('../../dist/ai/rag/chunker');
@@ -24,35 +21,15 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
     } catch {}
   });
 
-  describe('1, 2, 3, 4, 5: EmbeddingGateway & Provider', () => {
-    it('503 后重试，并在耗尽尝试次数时保留上游诊断标识', async () => {
-      const originalPost = axios.post;
-      let calls = 0;
-      axios.post = async () => {
-        calls += 1;
-        const error = new Error('Request failed with status code 503');
-        error.response = { status: 503, headers: { 'x-request-id': 'request-123' }, data: { error: { code: 'ServiceUnavailable' } } };
-        throw error;
-      };
-      try {
-        const provider = new DashScopeCompatibleEmbeddingProvider({
-          baseURL: 'https://example.com', model: 'test', apiKey: 'secret', maxRetries: 2,
-        });
-        await assert.rejects(provider.embed(['test']), /after 2 attempts: HTTP 503, code=ServiceUnavailable, request_id=request-123/);
-        assert.strictEqual(calls, 2);
-      } finally {
-        axios.post = originalPost;
-      }
-    });
-
-    it('resolveEmbeddingProvider 抛错当 ai.embedding 未配置或 apiKey 为占位符', () => {
+  describe('Embedding 配置解析', () => {
+    it('resolveEmbedder 抛错当 ai.embedding 未配置或 apiKey 为占位符', () => {
       assert.throws(
-        () => resolveEmbeddingProvider({ get: () => undefined }),
+        () => resolveEmbedder({ get: () => undefined }),
         /ai\.embedding is not configured/,
       );
 
       assert.throws(
-        () => resolveEmbeddingProvider({
+        () => resolveEmbedder({
           get: () => ({
             provider: 'dashscope-compatible',
             baseURL: 'https://api.example.com',
@@ -64,7 +41,7 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
       );
     });
 
-    it('resolveEmbeddingProvider 支持 use: 注入自定义 Provider', async () => {
+    it('resolveEmbedder 支持 use: 注入自定义 Provider', async () => {
       class MockEmbeddingProvider {
         async embed(texts) {
           return texts.map(() => [0.1, 0.2, 0.3]);
@@ -77,15 +54,9 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
         }),
       };
 
-      const provider = resolveEmbeddingProvider(configService);
+      const provider = resolveEmbedder(configService);
       const res = await provider.embed(['test']);
       assert.deepStrictEqual(res, [[0.1, 0.2, 0.3]]);
-    });
-
-    it('EmbeddingGateway 调用 embed 空数组直接返回 []', async () => {
-      const gateway = new EmbeddingGateway({ get: () => ({ use: { embed: async () => [] } }) });
-      const res = await gateway.embed([]);
-      assert.deepStrictEqual(res, []);
     });
   });
 
@@ -172,6 +143,38 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
   });
 
   describe('12, 13, 14: RetrieverService & Builtin Retrieve Tool', () => {
+    it('新索引清理旧版残留，删除源文档时移除切片，向量化失败时保留上次结果', async () => {
+      const docs = path.join(tmpDir, 'sync-docs');
+      fs.mkdirSync(docs, { recursive: true });
+      const oldPath = path.join(docs, 'old.txt');
+      const keepPath = path.join(docs, 'keep.txt');
+      fs.writeFileSync(keepPath, 'previous version');
+      fs.writeFileSync(oldPath, 'will be deleted');
+      const vectorFile = path.join(tmpDir, 'sync-index.json');
+      fs.writeFileSync(vectorFile, JSON.stringify({ records: [{
+        id: 'keep.txt#23', docId: 'keep.txt', embedding: [1, 0], text: 'legacy chunk',
+        meta: { filePath: keepPath },
+      }] }));
+
+      let failEmbedding = false;
+      const embedding = { embed: async texts => {
+        if (failEmbedding && texts.some(text => text.includes('changed'))) throw new Error('provider failure');
+        return texts.map(() => [1, 0]);
+      } };
+      const store = new FileVectorStore(vectorFile);
+      const retriever = new RetrieverService(store, {
+        get: key => key === 'ai.embedding' ? { use: embedding } : undefined,
+      });
+      assert.strictEqual((await retriever.ingestFromDirectory(docs)).chunks, 2);
+      fs.unlinkSync(oldPath);
+      fs.writeFileSync(keepPath, 'changed version');
+      failEmbedding = true;
+      const result = await retriever.ingestFromDirectory(docs);
+      assert.deepStrictEqual(result.failed, [{ docId: 'keep.txt', stage: 'embed' }]);
+      const hits = await new FileVectorStore(vectorFile).query([1, 0], 10);
+      assert.deepStrictEqual(hits.map(hit => [hit.docId, hit.text]), [['keep.txt', 'previous version']]);
+    });
+
     it('ingestFromDirectory 分块向量化落地，retrieve 检索出 hits', async () => {
       const docsDir = path.join(tmpDir, 'docs');
       fs.mkdirSync(docsDir, { recursive: true });
@@ -181,8 +184,8 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
       const storeFile = path.join(tmpDir, 'vector-retriever.json');
       const vectorStore = new FileVectorStore(storeFile);
 
-      // Mock EmbeddingGateway
-      const mockEmbeddingGateway = {
+      // 自定义向量化 Provider
+      const mockEmbedder = {
         embed: async (texts) => {
           return texts.map((t) => {
             if (t.includes('agent') || t.includes('agent')) return [1, 0];
@@ -192,13 +195,13 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
       };
 
       const mockConfig = {
-        get: (key) => ({
-          chunk: { size: 100, overlap: 10 },
-          topK: 2,
-        }),
+        get: key => {
+          if (key === 'ai.embedding') return { use: mockEmbedder };
+          if (key === 'ai.rag') return { chunk: { size: 100, overlap: 10 }, topK: 2 };
+        },
       };
 
-      const retriever = new RetrieverService(vectorStore, mockEmbeddingGateway, mockConfig);
+      const retriever = new RetrieverService(vectorStore, mockConfig);
 
       const ingestRes = await retriever.ingestFromDirectory(docsDir);
       assert.strictEqual(ingestRes.ingested, 2);

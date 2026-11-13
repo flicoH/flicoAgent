@@ -155,6 +155,7 @@ describe('T11: Guardrail · Assertions 断言库', () => {
         ensureThread: (id) => id || 'thread-123',
       };
       const mockCheckpointService = {
+        runTurn: async (_id, run) => run(),
         load: async () => null,
         save: async () => {},
       };
@@ -221,6 +222,8 @@ describe('T11: Guardrail · Assertions 断言库', () => {
     it('guardrailBlocked 校验 steps 含 type=guardrail', () => {
       assert.strictEqual(guardrailBlocked([{ type: 'guardrail', output: 'blocked' }]), true);
       assert.strictEqual(guardrailBlocked([{ type: 'plan' }, { type: 'final' }]), false);
+      assert.strictEqual(guardrailBlocked([{ type: 'plan', input: 'guardrail' }]), false);
+      assert.strictEqual(guardrailBlocked([{ type: 'tool', output: { type: 'guardrail' } }]), false);
       assert.strictEqual(guardrailBlocked([]), false);
       assert.strictEqual(guardrailBlocked(null), false);
     });
