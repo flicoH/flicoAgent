@@ -222,6 +222,12 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 | `test/` | Nest 和 AI 单元/集成测试 |
 | |
 
+### Token 用量
+
+Agent 同步结果、SSE 的 `done` 和 Trace 记录均可返回 `usage`，包含 `inputTokens`、`outputTokens`、`totalTokens`。每轮模型调用只记录一次，即使该轮请求多个工具。Trace 的规划步骤可查看单轮用量，`usage: null` 表示该轮未上报。自定义 Provider 可通过 `LlmChatResult.usage` 上报用量。
+
+用 `GET /api/ai/trace/{runId}/usage` 查询单次运行的消耗，返回 `{ success: true, data: { runId, usage } }`。合计只包含模型实际报告的用量。没有已上报数据时，查询接口返回 `usage: null`，包括加入统计之前的运行。
+
 ## 故障排查
 
 - **提示缺少模型 API Key**：确认当前环境配置文件存在、环境名正确，并且 `apiKey` 已读取到有效环境变量。
@@ -236,9 +242,3 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 ## License
 
 本项目 `package.json` 声明的许可证为 ISC。发布或使用前请确认其与源文件版权声明及项目实际授权一致。
-
-### Token 用量
-
-Agent 同步结果、SSE 的 `done` 和 Trace 记录均可返回 `usage`，包含 `inputTokens`、`outputTokens`、`totalTokens`。每轮模型调用只记录一次，即使该轮请求多个工具。Trace 的规划步骤可查看单轮用量，`usage: null` 表示该轮未上报。自定义 Provider 可通过 `LlmChatResult.usage` 上报用量。
-
-用 `GET /api/ai/trace/{runId}/usage` 查询单次运行的消耗，返回 `{ success: true, data: { runId, usage } }`。合计只包含模型实际报告的用量。没有已上报数据时，查询接口返回 `usage: null`，包括加入统计之前的运行。
