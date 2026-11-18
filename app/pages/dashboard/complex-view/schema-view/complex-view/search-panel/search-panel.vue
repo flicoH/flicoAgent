@@ -19,7 +19,7 @@
 </template>
 <script setup>
 import { inject } from 'vue'
-import SchemaSearchBar from '$agentSchemaSearchBar'
+import SchemaSearchBar from '$elpisSchemaSearchBar'
 const { searchSchema } = inject('schemaViewData')
 
 const emit = defineEmits(['search']);

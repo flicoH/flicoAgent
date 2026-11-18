@@ -19,7 +19,7 @@
 </template>
 <script setup>
 import { ref, onMounted } from 'vue'
-import $curl from '$agentCommon/curl'
+import $curl from '$elpisCommon/curl'
 const { schemaKey, schema } = defineProps({
   schemaKey: {
     type: String,

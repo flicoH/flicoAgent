@@ -9,7 +9,7 @@
  */
 import { ref, watch, onMounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import { useMenuStore } from '$agentStore/menu'
+import { useMenuStore } from '$elpisStore/menu'
 
 export const useSchema = () => {
   const route = useRoute()

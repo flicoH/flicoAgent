@@ -54,15 +54,15 @@ function scanBusinessModules(): Type[] {
 }
 
 /**
- * agent 核心根模块
+ * Elpis 核心根模块
  *
  * 【职责】
  * 负责组装底层全局能力、框架内置模块（AI、项目、视图）、动态扫描导入的业务模块，
  * 以及设置全局异常过滤器 (HttpExceptionFilter) 和 API 验签守卫 (ApiSignGuard)。
  */
-export class agentModule {
+export class ElpisModule {
   /**
-   * 注册 agent 动态模块
+   * 注册 Elpis 动态模块
    * 按照严格的装配顺序组织 imports 列表：
    * 1. AiModule (AI Agent 运行时)
    * 2. ExtendModule (logger, db 等扩展提供者)
@@ -73,7 +73,7 @@ export class agentModule {
    */
   static register(): DynamicModule {
     return {
-      module: agentModule,
+      module: ElpisModule,
       imports: [
         AiModule,
         ExtendModule,
@@ -86,7 +86,7 @@ export class agentModule {
       providers: [
         // 全局 HTTP 异常过滤器
         { provide: APP_FILTER, useClass: HttpExceptionFilter },
-        // 全局 API Guard，兼容业务接口验签并为 AI 接口执行独立授权。
+        // 全局 API 验签 Guard，校验施工单密钥及时间戳
         { provide: APP_GUARD, useClass: ApiSignGuard },
       ],
     };
@@ -102,8 +102,8 @@ export class agentModule {
 }
 
 // 静态动态模块自注册到元数据，支持 NestFactory 直接作为根模块启动
-const registeredModule = agentModule.register();
+const registeredModule = ElpisModule.register();
 Module({
   imports: registeredModule.imports,
   providers: registeredModule.providers,
-})(agentModule);
+})(ElpisModule);

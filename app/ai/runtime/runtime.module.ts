@@ -13,7 +13,9 @@ import { LangGraphOrchestratorService } from './langgraph/langgraph-orchestrator
  *
  * 【职责】
  * 组装基于 LangChain (Planner) 与 LangGraph (Orchestrator) 的 Agent 生产运行时：
- * 注入 ToolModule 导出的执行器，组装规划与编排服务。
+ * 1. 导入各依赖子模块：AgentModule, SkillModule, ToolModule, StoreModule, MemoryModule, GuardrailModule；
+ * 2. 内部注册 LangChainPlannerService, LangGraphOrchestratorService, 通过 ToolModule 注入 ExecutorService；
+ * 3. 仅导出 LangGraphOrchestratorService。
  */
 @Module({
   imports: [

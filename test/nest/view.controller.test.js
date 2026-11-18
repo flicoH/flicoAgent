@@ -118,7 +118,7 @@ describe('View 壳（不启动服务）', () => {
   });
 
   it('只读渲染 Part1 已生成的 demo 模板，保留 9002 脚本地址', function () {
-    const demoPath = path.resolve(root, '../elips-demo');
+    const demoPath = path.resolve(root, '../agent-demo');
     const pages = ['project-list', 'dashboard'];
     if (!pages.every(page => fs.existsSync(path.join(demoPath, `app/public/dist/entry.${page}.tpl`)))) this.skip();
     process.chdir(demoPath);

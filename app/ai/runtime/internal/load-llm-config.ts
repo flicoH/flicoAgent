@@ -1,14 +1,11 @@
-import { ConfigService } from '../../../config/config.service';
-import { BadRequestException } from '@nestjs/common';
 import { ChatOpenAI } from '@langchain/openai';
+import type { ConfigService } from '../../../config/config.service';
 import type { LlmProvider } from '../../contracts';
 
 /**
  * 单个 LLM 模型的配置项结构
  */
 interface LlmModelConfig {
-  /** 仅对支持 stream_options.include_usage 的上游开启。 */
-  streamUsage?: boolean;
   /** Provider 类型标识，内置通用实现为 'openai-compatible' */
   provider?: string;
   /** API 根路径（例如 'https://dashscope.aliyuncs.com/compatible-mode/v1'），不包含 '/chat/completions' */
@@ -38,24 +35,44 @@ interface AiConfig {
   llm?: LlmConfig;
 }
 
+/**
+ * 常用国内/主流大模型提供商的默认 OpenAI-compatible 端点及模型名映射
+ */
+const KNOWN_MODEL_DEFAULTS: Record<string, { baseURL: string; model: string }> = {
+  kimi: {
+    baseURL: 'https://api.moonshot.cn/v1',
+    model: 'kimi-k2.6',
+  },
+  moonshot: {
+    baseURL: 'https://api.moonshot.cn/v1',
+    model: 'kimi-k2.6',
+  },
+  qwen: {
+    baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+  },
+  deepseek: {
+    baseURL: 'https://api.deepseek.com/v1',
+    model: 'deepseek-chat',
+  },
+};
+
 export function resolveLlm(
   configService: ConfigService,
-  requestedModel?: string,
+  modelName?: string,
 ): { kind: 'langchain'; model: ChatOpenAI } | { kind: 'custom'; provider: LlmProvider } {
-  const llm = configService.get<AiConfig>('ai')?.llm ?? configService.get<LlmConfig>('ai.llm');
-  const modelName = requestedModel ?? llm?.default;
-
-  if (!modelName) {
+  const llm = configService.get<AiConfig>('ai')?.llm
+    ?? configService.get<LlmConfig>('ai.llm');
+  const selectedModel = modelName ?? llm?.default;
+  if (!selectedModel) {
     throw new Error('ai.llm.default is not configured');
   }
 
-  const modelConfig = llm?.models && Object.hasOwn(llm.models, modelName) ? llm.models[modelName] : undefined;
+  const modelConfig = llm?.models?.[selectedModel];
   if (!modelConfig) {
-    if (requestedModel) throw new BadRequestException('Unknown model');
-    throw new Error(`LLM model "${modelName}" is not configured in ai.llm.models`);
+    throw new Error(`LLM model "${selectedModel}" is not configured in ai.llm.models`);
   }
 
-  // 1. 业务自定义扩展 Provider 优先
   if (modelConfig.use) {
     const provider = typeof modelConfig.use === 'function'
       ? new modelConfig.use(modelConfig)
@@ -63,25 +80,27 @@ export function resolveLlm(
     return { kind: 'custom', provider };
   }
 
-  // 2. 检查内置 Provider 支持情况
   if (modelConfig.provider !== 'openai-compatible') {
-    throw new Error(`Unsupported LLM provider "${modelConfig.provider ?? ''}" for model "${modelName}"`);
+    throw new Error(`Unsupported LLM provider "${modelConfig.provider ?? ''}" for model "${selectedModel}"`);
+  }
+  if (!modelConfig.apiKey || modelConfig.apiKey === 'xxxx') {
+    throw new Error(`LLM model "${selectedModel}" requires a non-placeholder apiKey at ai.llm.models.${selectedModel}.apiKey`);
   }
 
-  // 3. 拦截占位符或未配置 Key，在请求发出前及时预警
-  if (!modelConfig.apiKey || modelConfig.apiKey === 'xxxx') {
-    throw new Error(`LLM model "${modelName}" requires a non-placeholder apiKey at ai.llm.models.${modelName}.apiKey`);
-  }
-  if (!modelConfig.baseURL || !modelConfig.model) {
-    throw new Error(`LLM model "${modelName}" requires provider, baseURL, and model configuration`);
-  }
+  const defaults = KNOWN_MODEL_DEFAULTS[selectedModel.toLowerCase()];
+  const resolved = {
+    apiKey: modelConfig.apiKey,
+    model: modelConfig.model ?? defaults?.model ?? selectedModel,
+    baseURL: modelConfig.baseURL ?? defaults?.baseURL
+      ?? process.env.OPENAI_BASE_URL ?? process.env.OPENAI_API_BASE,
+  };
 
   return {
     kind: 'langchain',
     model: new ChatOpenAI({
-      apiKey: modelConfig.apiKey,
-      model: modelConfig.model,
-      configuration: { baseURL: modelConfig.baseURL.replace(/\/+$/, '') },
+      apiKey: resolved.apiKey,
+      model: resolved.model,
+      configuration: resolved.baseURL ? { baseURL: resolved.baseURL.replace(/\/+$/, '') } : undefined,
       temperature: 0,
       maxRetries: 2,
     }),

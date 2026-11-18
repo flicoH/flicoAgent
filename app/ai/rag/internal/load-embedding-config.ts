@@ -1,5 +1,5 @@
-import { ConfigService } from '../../../config/config.service';
 import { OpenAIEmbeddings } from '@langchain/openai';
+import type { ConfigService } from '../../../config/config.service';
 import type { EmbeddingProvider } from '../../contracts';
 
 /**
@@ -57,12 +57,12 @@ interface AiConfig {
  * 6. 实例化并返回通用向量化提供者。
  *
  * @param configService 全局配置服务
- * @param requestedModel 可选的模型名称
+ * @param modelName 可选的模型配置名称
  * @returns 解析得到的 EmbeddingProvider 实例
  */
 export function resolveEmbedder(
   configService: ConfigService,
-  requestedModel?: string,
+  modelName?: string,
 ): EmbeddingProvider {
   const embedding = configService.get<AiConfig>('ai')?.embedding
     ?? configService.get<EmbeddingConfig>('ai.embedding');
@@ -72,7 +72,7 @@ export function resolveEmbedder(
   }
 
   // 确定模型配置：字典表或扁平声明
-  const modelName = requestedModel ?? embedding.default;
+  modelName ??= embedding.default;
   let modelConfig: EmbeddingModelConfig | undefined;
 
   if (embedding.models && modelName && embedding.models[modelName]) {
@@ -106,7 +106,7 @@ export function resolveEmbedder(
   // 3. 获取并拦截占位符或未配置 Key（优先读取 embedding.models，支持从 llm.models 对应模型名称回退复用同一厂商 Key）
   const apiKey = (modelConfig.apiKey && modelConfig.apiKey !== 'xxxx')
     ? modelConfig.apiKey
-    : configService.get<any>('ai')?.llm?.models?.[modelName ?? '']?.apiKey;
+    : configService.get<{ llm?: { models?: Record<string, { apiKey?: string }> } }>('ai')?.llm?.models?.[modelName ?? '']?.apiKey;
 
   if (!apiKey || apiKey === 'xxxx' || apiKey === 'sk-your-key-here') {
     throw new Error(`Embedding model "${modelName}" requires a non-placeholder apiKey in config.local.js (ai.embedding.models.${modelName}.apiKey or ai.llm.models.${modelName}.apiKey)`);
@@ -115,13 +115,12 @@ export function resolveEmbedder(
     throw new Error(`Embedding model requires provider, baseURL, and model configuration`);
   }
 
-  const embedder = new OpenAIEmbeddings({
-    configuration: { baseURL: modelConfig.baseURL.replace(/\/+$/, '') },
-    model: modelConfig.model,
+  const model = new OpenAIEmbeddings({
     apiKey,
+    model: modelConfig.model,
+    configuration: { baseURL: modelConfig.baseURL.replace(/\/+$/, '') },
     batchSize: modelConfig.batchSize ?? 16,
     maxRetries: modelConfig.maxRetries ?? 3,
-    stripNewLines: false,
   });
-  return { embed: texts => embedder.embedDocuments(texts) };
+  return { embed: (texts) => model.embedDocuments(texts) };
 }

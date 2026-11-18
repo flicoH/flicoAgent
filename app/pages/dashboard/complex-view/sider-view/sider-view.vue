@@ -37,8 +37,8 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { useMenuStore } from '$agentStore/menu.js';
-import SiderContainer from '$agentSiderContainer'
+import { useMenuStore } from '$elpisStore/menu.js';
+import SiderContainer from '$elpisSiderContainer'
 import SubMenu from './complex-view/sub-menu/sub-menu.vue'
 
 const router = useRouter()

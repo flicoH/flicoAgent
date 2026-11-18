@@ -18,8 +18,8 @@ flicoAgent 是一个基于 NestJS 的应用框架内核，提供项目配置、�
 需要 Node.js 22.22.3（仓库的 `.nvmrc` 指定版本）和 npm 10。
 
 ```bash
-git clone --branch feature/agent https://github.com/flicoH/flicoAgent
-cd elips
+git clone --branch feature/agent https://github.com/flicoH/flicoAgent agent
+cd agent
 nvm install  # 使用 nvm 时执行，读取 .nvmrc
 nvm use      # 已使用指定 Node.js 版本时可跳过两条 nvm 命令
 npm ci

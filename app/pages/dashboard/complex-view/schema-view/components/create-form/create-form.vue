@@ -32,8 +32,8 @@
 <script setup>
 import { ref, inject } from 'vue'
 import { ElNotification } from 'element-plus'
-import SchemaForm from '$agentSchemaForm'
-import $curl from '$agentCommon/curl.js'
+import SchemaForm from '$elpisSchemaForm'
+import $curl from '$elpisCommon/curl.js'
 const {
   api,
   components,

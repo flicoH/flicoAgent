@@ -13,7 +13,7 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
-import { useMenuStore } from '$agentStore/menu';
+import { useMenuStore } from '$elpisStore/menu';
 
 const route = useRoute()
 const menuStore = useMenuStore()

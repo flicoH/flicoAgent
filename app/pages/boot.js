@@ -15,10 +15,10 @@ import { createApp } from "vue";
 import ElementPlus from 'element-plus';
 import 'element-plus/dist/index.css';
 import 'element-plus/theme-chalk/dark/css-vars.css'
-import '$agentAssets/cusiom.css'
+import '$elpisAssets/cusiom.css'
 
 // 引入pinia
-import pinia from '$agentStore'
+import pinia from '$elpisStore'
 // 引入路由
 import { createRouter, createWebHistory } from 'vue-router'
 

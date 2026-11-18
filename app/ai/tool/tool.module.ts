@@ -9,7 +9,7 @@ import { ToolRegistryService } from './tool-registry.service';
  * 【职责】
  * 封装通用工具注册表服务：
  * 1. 实例化 `ToolRegistryService` 并自动装配所有框架内置工具；
- * 2. 导出 `ToolRegistryService`，向 `AiController` 暴露查询端点，向 `RuntimeModule` 提供工具调度支持。
+ * 2. 导出 `ToolRegistryService`，向 `AiController` 暴露查询端点，向 `RuntimeModule` 导出 `ExecutorService` 以调度 Skill 与 Tool。
  */
 @Module({
   imports: [SkillModule],

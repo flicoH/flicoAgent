@@ -68,11 +68,9 @@ export class McpLoader {
           name: desc.name,
           description: desc.description ?? '',
           inputSchema: desc.inputSchema ?? {},
-          ...(server.approvalTools?.includes(desc.name) ? { approval: 'required' as const } : {}),
           source: 'mcp', // 必填，禁止默认 builtin
-          execute: async (input: unknown, context) => {
-            const signal = context?.signal;
-            return client.callTool(desc.name, input, signal instanceof AbortSignal ? signal : undefined);
+          execute: async (input: unknown) => {
+            return client.callTool(desc.name, input);
           },
         };
 

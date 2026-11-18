@@ -37,8 +37,8 @@
 <script setup>
 import { ref, inject } from 'vue'
 import { ElMessageBox, ElNotification } from 'element-plus';
-import $curl from '$agentCommon/curl.js'
-import schemaTable from '$agentSchemaTable';
+import $curl from '$elpisCommon/curl.js'
+import schemaTable from '$elpisSchemaTable';
 
 const emit = defineEmits(['operate'])
 

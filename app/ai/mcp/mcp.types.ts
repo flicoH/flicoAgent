@@ -10,8 +10,6 @@ export interface McpServerConfig {
   name: string;
   /** 通信或调用超时时间（毫秒） */
   timeoutMs?: number;
-  /** 业务显式指定需要审批的 MCP 工具清单。 */
-  approvalTools?: string[];
 
   // stdio 本地拉起（与 url 二选一）
   /** 启动命令（例如 node） */

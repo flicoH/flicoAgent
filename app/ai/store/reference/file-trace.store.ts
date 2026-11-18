@@ -1,9 +1,8 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { TraceRun } from '../../contracts';
-import type { TraceListQuery, TraceStore } from '../store.interface';
-import { writeJsonAtomically } from './write-json-atomically';
+import type { TraceStore } from '../store.interface';
 
 /**
  * 文件型 Trace 存储实现 (FileTraceStore)
@@ -64,7 +63,14 @@ export class FileTraceStore implements TraceStore {
    * @param run 完整的运行轨迹记录
    */
   async save(run: TraceRun): Promise<void> {
-    await writeJsonAtomically(this.filePath(run.runId), run);
+    await mkdir(this.rootDir, { recursive: true });
+    const target = this.filePath(run.runId);
+    const temporary = `${target}.tmp`;
+
+    // 先写入同目录临时文件，再替换目标；固定临时文件名不协调同一 runId 的并发写入。
+    await writeFile(temporary, JSON.stringify(run, null, 2), 'utf8');
+    // 利用操作系统的 rename 系统调用原子替换目标文件
+    await rename(temporary, target);
   }
 
   /**
@@ -98,20 +104,6 @@ export class FileTraceStore implements TraceStore {
     } catch {
       return this.loadLatest();
     }
-  }
-
-  async list({ scope, agents, limit, offset }: TraceListQuery): Promise<TraceRun[]> {
-    // 文件存储是小规模参考实现；数据库实现可在存储层通过索引完成过滤与排序。
-    const runs: TraceRun[] = [];
-    for (const file of await readdir(this.rootDir)) {
-      if (!/^[a-zA-Z0-9_-]+\.json$/.test(file)) continue;
-      const id = file.slice(0, -5);
-      if (['latest', 'runId', 'default'].includes(id)) continue;
-      const run = await this.load(id);
-      if (run && run.scope === scope && (!agents || agents.includes(run.agent))) runs.push(run);
-    }
-    return runs.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.runId.localeCompare(a.runId))
-      .slice(offset, offset + limit);
   }
 
   /**

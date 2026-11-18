@@ -13,12 +13,12 @@ export const DEFAULT_MAX_ITERATIONS = 5;
  * @returns 解析出的正整数，若无效则返回 null
  */
 function parsePositiveInteger(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= 1 && value <= Number.MAX_SAFE_INTEGER) {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
     return Math.floor(value);
   }
   if (typeof value === 'string' && value.trim()) {
     const parsed = Number(value.trim());
-    if (Number.isFinite(parsed) && parsed >= 1 && parsed <= Number.MAX_SAFE_INTEGER) {
+    if (Number.isFinite(parsed) && parsed > 0) {
       return Math.floor(parsed);
     }
   }

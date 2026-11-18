@@ -12,7 +12,7 @@ const fs = require('fs');
 const glob = require('glob');
 const path = require('path');
 const vue = require('@vitejs/plugin-vue');
-const agentTplPlugin = require('../plugins/agent-tpl-plugin');
+const elpisTplPlugin = require('../plugins/elpis-tpl-plugin');
 
 function scanEntries() {
   const handleFile = file => ({
@@ -45,32 +45,32 @@ const alias = {
     process.cwd(),
     'node_modules/element-plus/dist/locale/zh-cn.mjs'
   ),
-  $agentPages: path.resolve(__dirname, '../../pages'),
-  $agentCommon: path.resolve(__dirname, '../../pages/common'),
-  $agentWidgets: path.resolve(__dirname, '../../pages/widgets'),
-  $agentStore: path.resolve(__dirname, '../../pages/store'),
-  $agentAssets: path.resolve(__dirname, '../../pages/assets'),
-  $agentHeaderContainer: path.resolve(
+  $elpisPages: path.resolve(__dirname, '../../pages'),
+  $elpisCommon: path.resolve(__dirname, '../../pages/common'),
+  $elpisWidgets: path.resolve(__dirname, '../../pages/widgets'),
+  $elpisStore: path.resolve(__dirname, '../../pages/store'),
+  $elpisAssets: path.resolve(__dirname, '../../pages/assets'),
+  $elpisHeaderContainer: path.resolve(
     __dirname,
     '../../pages/widgets/header-container/header-container.vue'
   ),
-  $agentSiderContainer: path.resolve(
+  $elpisSiderContainer: path.resolve(
     __dirname,
     '../../pages/widgets/sider-container/sider-container.vue'
   ),
-  $agentSchemaTable: path.resolve(
+  $elpisSchemaTable: path.resolve(
     __dirname,
     '../../pages/widgets/schema-table/schema-table.vue'
   ),
-  $agentSchemaForm: path.resolve(
+  $elpisSchemaForm: path.resolve(
     __dirname,
     '../../pages/widgets/schema-form/schema-form.vue'
   ),
-  $agentSchemaSearchBar: path.resolve(
+  $elpisSchemaSearchBar: path.resolve(
     __dirname,
     '../../pages/widgets/schema-search-bar/schema-search-bar.vue'
   ),
-  $agentBoot: path.resolve(__dirname, '../../pages/boot.js'),
+  $elpisBoot: path.resolve(__dirname, '../../pages/boot.js'),
   $businessDashBoardRouterConfig: withFallback(
     path.resolve(process.cwd(), './app/pages/dashboard/router.js')
   ),
@@ -88,7 +88,7 @@ const alias = {
   ),
 };
 const baseConfig = {
-  plugins: [vue(), agentTplPlugin()],
+  plugins: [vue(), elpisTplPlugin()],
   resolve: {
     alias,
     dedupe: ['vue', 'element-plus'],

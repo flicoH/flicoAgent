@@ -7,7 +7,7 @@
  * @Date: 2026-08-28 13:48:36
  * @LastEditors: flicoH
  */
-import boot from '$agentPages/boot'
+import boot from '$elpisPages/boot'
 import dashboard from './dashboard.vue'
 import businessDashBoardRouterConfig from '$businessDashBoardRouterConfig'
 

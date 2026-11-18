@@ -14,12 +14,12 @@ import { ToolModule } from './tool/tool.module';
  * AI 核心聚合模块 (AiModule)
  *
  * 【架构职责】
- * 作为 agent 框架 Agent Runtime Harness 的总装配入口：
+ * 作为 elpis 框架 Agent Runtime Harness 的总装配入口：
  * 1. 聚合底层基础设施模块：
  *    - StoreModule: 状态持久化（Trace 链路存储）
  * 2. 聚合能力与资源声明模块：
  *    - SkillModule: 业务技能（Skill）的扫描、校验与注册
- *    - ToolModule: 通用工具（Tool）的注册表与执行器
+ *    - ToolModule: 通用工具（Tool）的注册表与内置检索工具
  *    - McpModule: 外部 MCP Server 适配与扩展
  *    - AgentModule: Agent 声明扫描与元数据管理
  * 3. 聚合运行时与高级模块：
@@ -33,7 +33,7 @@ import { ToolModule } from './tool/tool.module';
   imports: [
     // 注入存储能力（TraceStore 及 TraceService）
     StoreModule,
-    // 注入 SkillScannerService，供运行时解析已注册的业务 Skill
+    // 注册业务 Skill
     SkillModule,
     // 注入 ToolRegistryService，使 Controller 可返回已注册工具列表
     ToolModule,

@@ -84,7 +84,7 @@ export function resolveMemoryMaxTurns(config: ConfigService): number {
  * 解析是否启用多轮会话线程与 Checkpoint 记忆保持 (threadEnabled)
  *
  * 【解析优先级纪律】
- * 1. 优先读取 `agentConfig.threadEnabled`（对齐 agent 全局配置机制，支持 local/beta/prod 覆盖）；
+ * 1. 优先读取 `agentConfig.threadEnabled`（对齐 elpis 全局配置机制，支持 local/beta/prod 覆盖）；
  * 2. 次级读取 `ai.agentConfig.threadEnabled` 或 `ai.store.memory.threadEnabled`；
  * 3. 缺省返回 true（默认开启会话上下文保持）。
  *

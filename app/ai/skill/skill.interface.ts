@@ -20,8 +20,6 @@ export interface SkillContext {
  * 3. 实现无副作用或有业务语义的异步执行逻辑。
  */
 export interface SkillDefinition {
-  /** 有副作用的能力可要求人工审批后执行。 */
-  approval?: 'required';
   /**
    * 技能的唯一注册名称
    * 同时作为大模型 Function Calling (Tools) 中的函数名，禁止重名

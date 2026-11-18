@@ -14,7 +14,7 @@ const toEntryModulePath = entryPath => {
 };
 
 module.exports = () => ({
-  name: 'agent-tpl-plugin',
+  name: 'elpis-tpl-plugin',
   configureServer(server) {
     void server;
     const { allEntries } = require('../config/vite.base');
@@ -57,7 +57,7 @@ module.exports = () => ({
       });
 
       if (!entryChunk) {
-        throw new Error(`[agent-tpl-plugin] entry chunk not found: ${entryName}`);
+        throw new Error(`[elpis-tpl-plugin] entry chunk not found: ${entryName}`);
       }
 
       const cssFiles = new Set();

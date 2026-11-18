@@ -1,7 +1,5 @@
-import { Injectable, OnModuleInit, Optional } from '@nestjs/common';
+import { Injectable, OnModuleInit } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
-import { ConfigService } from '../../config/config.service';
-import { DELEGATE_TOOL } from '../runtime/internal/delegation';
 import { builtinTools } from './builtin';
 import { ToolDefinition } from './tool.interface';
 
@@ -24,7 +22,7 @@ export class ToolRegistryService implements OnModuleInit {
    * 构造函数注入 ModuleRef，用于按需传给内置工具工厂以访问 Nest 容器
    * @param moduleRef NestJS 模块引用
    */
-  constructor(private readonly moduleRef: ModuleRef, @Optional() private readonly config?: ConfigService) {}
+  constructor(private readonly moduleRef: ModuleRef) {}
 
   /**
    * 模块生命周期初始化钩子：实例化并注册所有框架内置工具
@@ -32,7 +30,7 @@ export class ToolRegistryService implements OnModuleInit {
   onModuleInit(): void {
     // 注册表不直接内联任何具体工具实现，而是遍历工厂清单并通过标准 register 接口注册
     for (const createTool of builtinTools) {
-      this.register(createTool({ moduleRef: this.moduleRef, config: this.config }));
+      this.register(createTool({ moduleRef: this.moduleRef }));
     }
     // 控制台输出已注册工具名称，便于启动自检
     console.log('[ToolRegistry] registered tools:', this.listNames());
@@ -48,8 +46,6 @@ export class ToolRegistryService implements OnModuleInit {
     if (!tool.name) {
       throw new Error('Tool name is required');
     }
-    if (tool.name === DELEGATE_TOOL) throw new Error('Tool name is reserved for Agent delegation');
-    if (tool.approval !== undefined && tool.approval !== 'required') throw new Error('Invalid tool approval policy');
     if (this.tools.has(tool.name)) {
       throw new Error(`Duplicate tool name "${tool.name}"`);
     }

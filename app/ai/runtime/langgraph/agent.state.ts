@@ -31,15 +31,12 @@ export interface GraphStep extends Step {
  * - `maxIterations`: 最大循环上限。读取全局配置服务注入，禁止写死 5；
  * - `tools`: 当前 Agent 经白名单筛选后的 LangChain StructuredTool 集合；
  * - `toolCalls`: 规划器在当前轮次决策出的工具调用列表；
- * - `executionResults`: 当前轮次每个工具调用及其执行结果；
+ * - `executionResult`: 执行器在 execute 节点产生的单次执行结果；
  * - `finalAnswer`: 最终文本答复。非空时触发条件边流转至 END 退出循环；
  * - `isMaxIterationError`: 标识是否因达到最大轮次而安全熔断；
  * - `steps`: 聚合全流程产生的所有执行步骤，reducer 自动按序拼接。
  */
 export const AgentStateAnnotation = Annotation.Root({
-  // 启动路由只在从持久化快照恢复时跳过 plan。
-  resume: Annotation<boolean>(),
-  waiting: Annotation<boolean>(),
   // 当前多轮消息历史
   messages: Annotation<LlmMessage[]>({
     reducer: (x, y) => y ?? x,
@@ -66,7 +63,10 @@ export const AgentStateAnnotation = Annotation.Root({
     default: () => undefined,
   }),
   // 执行器返回的执行结果
-  executionResults: Annotation<Array<{ call: LangChainToolCall; result: ExecutionResult }>>(),
+  executionResult: Annotation<ExecutionResult | undefined>({
+    reducer: (x, y) => y,
+    default: () => undefined,
+  }),
   // 最终回答文本（若产生则退出循环）
   finalAnswer: Annotation<string | undefined>({
     reducer: (x, y) => y,

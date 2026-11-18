@@ -148,8 +148,7 @@ export class SkillToolAdapter {
     // 2. 适配通用工具与 MCP 外部工具 (Tool)
     for (const name of toolNames) {
       const tool = this.tools.get(name);
-      // 同名时与执行器保持一致，只有已获准且存在的 Skill 优先。
-      if (tool && !adapted.some(capability => capability.name === name)) {
+      if (tool) {
         adapted.push(this.adaptTool(tool));
       }
     }
@@ -171,7 +170,6 @@ export class SkillToolAdapter {
       if (!target) {
         throw new Error(`Skill "${skillName}" is not registered`);
       }
-      if (target.approval === 'required') throw new Error('Capability requires managed run approval');
       return target.execute(input, context);
     };
   }
@@ -189,7 +187,6 @@ export class SkillToolAdapter {
       if (!target) {
         throw new Error(`Tool "${toolName}" is not registered`);
       }
-      if (target.approval === 'required') throw new Error('Capability requires managed run approval');
       return target.execute(input);
     };
   }

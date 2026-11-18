@@ -7,13 +7,6 @@ import { FileTraceStore } from './reference/file-trace.store';
 import { FileVectorStore } from './reference/file-vector.store';
 import { FileMemoryStore } from './reference/file-memory.store';
 import { MEMORY_STORE, TRACE_STORE, VECTOR_STORE } from './store.interface';
-import type { MemoryStore, TraceStore, VectorStore } from './store.interface';
-
-/** use 可以是现成存储实例，也可以是接收框架配置的工厂。 */
-function resolveStore<T>(config: ConfigService, kind: string, fallback: () => T): T {
-  const use = config.get<T | ((config: ConfigService) => T)>(`ai.store.${kind}.use`);
-  return typeof use === 'function' ? (use as (config: ConfigService) => T)(config) : use ?? fallback();
-}
 
 /**
  * 存储模块 (StoreModule)
@@ -31,7 +24,7 @@ function resolveStore<T>(config: ConfigService, kind: string, fallback: () => T)
       provide: TRACE_STORE,
       // 使用工厂根据 ai.store.trace 配置动态创建 FileTraceStore 实例
       useFactory: (config: ConfigService) => (
-        resolveStore<TraceStore>(config, 'trace', () => new FileTraceStore(resolveTraceStorePath(config)))
+        new FileTraceStore(resolveTraceStorePath(config))
       ),
       inject: [ConfigService],
     },
@@ -39,7 +32,7 @@ function resolveStore<T>(config: ConfigService, kind: string, fallback: () => T)
       provide: VECTOR_STORE,
       // 使用工厂根据 ai.store.vector 配置动态创建 FileVectorStore 实例
       useFactory: (config: ConfigService) => (
-        resolveStore<VectorStore>(config, 'vector', () => new FileVectorStore(resolveVectorStorePath(config)))
+        new FileVectorStore(resolveVectorStorePath(config))
       ),
       inject: [ConfigService],
     },
@@ -47,7 +40,7 @@ function resolveStore<T>(config: ConfigService, kind: string, fallback: () => T)
       provide: MEMORY_STORE,
       // 使用工厂根据 ai.store.memory.path 配置动态创建 FileMemoryStore 实例
       useFactory: (config: ConfigService) => (
-        resolveStore<MemoryStore>(config, 'memory', () => new FileMemoryStore(resolveMemoryPath(config)))
+        new FileMemoryStore(resolveMemoryPath(config))
       ),
       inject: [ConfigService],
     },

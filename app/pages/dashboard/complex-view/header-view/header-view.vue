@@ -65,10 +65,10 @@
 import { ref, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ArrowDown } from '@element-plus/icons-vue'
-import HeaderContainer from '$agentHeaderContainer'
+import HeaderContainer from '$elpisHeaderContainer'
 import SubMenu from './complex-view/sub-menu/sub-menu.vue'
-import { useMenuStore } from '$agentStore/menu.js';
-import { useProjectStore } from '$agentStore/project.js';
+import { useMenuStore } from '$elpisStore/menu.js';
+import { useProjectStore } from '$elpisStore/project.js';
 
 const route = useRoute()
 const menuStore = useMenuStore()

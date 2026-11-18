@@ -64,7 +64,7 @@ import {
   nextTick,
   onMounted
 } from 'vue';
-import $curl from '$agentCommon/curl'
+import $curl from '$elpisCommon/curl'
 const props = defineProps({
   /**
    * schema配置

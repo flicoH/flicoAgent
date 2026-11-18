@@ -1,4 +1,3 @@
-import { performance } from 'node:perf_hooks';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import type { LlmToolMessage } from '../../contracts';
 import { ExecutionResult } from '../../contracts';
@@ -29,16 +28,6 @@ export interface AgentGraphDeps {
   agentName: string;
   /** 可选的模型名称覆盖 */
   agentModel?: string;
-  allowed?: { skills: readonly string[]; tools: readonly string[] };
-  context?: Record<string, unknown>;
-  signal?: AbortSignal;
-  /** 规划前扣减根运行及所有子运行共享的模型调用预算。返回 false 时记录熔断步骤。 */
-  consumeModel?: () => boolean;
-  /** 编排器在此处理审批和委派。返回 null 表示当前调用尚未执行，图应先退出。 */
-  executeCall?: (state: AgentStateType, call: LangChainToolCall,
-    completed: AgentStateType['executionResults']) => Promise<ExecutionResult | null>;
-  onDelta?: (content: string) => Promise<void> | void;
-  resetDelta?: () => Promise<void> | void;
   /** 步骤产生时的持久化与实时推送回调钩子 */
   recordStep?: (step: GraphStep) => Promise<void> | void;
 }
@@ -64,13 +53,13 @@ function serializeObservation(value: unknown): string {
  * @param output 熔断说明文本
  * @returns GraphStep 步骤实体
  */
-function buildMaxIterationStep(maxIterations: number, output: string, code: string): GraphStep {
+function buildMaxIterationStep(maxIterations: number, output: string): GraphStep {
   return {
     type: 'final',
     node: 'plan',
     iteration: maxIterations,
     output,
-    error: { code, message: output },
+    error: { code: 'MAX_ITERATIONS', message: output },
     timestamp: new Date().toISOString(),
   };
 }
@@ -137,8 +126,6 @@ function buildExecutionStep(
     node: 'execute',
     iteration,
     name: execution.name,
-    ...(execution.citations ? { citations: execution.citations } : {}),
-    ...(execution.childRunId ? { childRunId: execution.childRunId } : {}),
     ...(execution.source ? { source: execution.source } : {}),
     input: toolCall.args,
     output: execution.output,
@@ -189,16 +176,12 @@ function buildObserveStep(
  */
 export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
   return async (state: AgentStateType): Promise<AgentStateUpdate> => {
-    deps?.signal?.throwIfAborted();
     const currentIteration = state.iteration + 1;
 
     // 迭代轮次刹车：超过 maxIterations 立即熔断
-    const iterationLimit = currentIteration > state.maxIterations;
-    if (iterationLimit || deps?.consumeModel?.() === false) {
-      const output = iterationLimit
-        ? `Agent reached the maximum of ${state.maxIterations} iterations`
-        : 'Agent reached the shared model call budget';
-      const finalStep = buildMaxIterationStep(state.iteration, output, iterationLimit ? 'MAX_ITERATIONS' : 'MODEL_BUDGET_EXCEEDED');
+    if (currentIteration > state.maxIterations) {
+      const output = `Agent reached the maximum of ${state.maxIterations} iterations`;
+      const finalStep = buildMaxIterationStep(state.maxIterations, output);
       if (deps?.recordStep) {
         await deps.recordStep(finalStep);
       }
@@ -218,35 +201,22 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
     }
 
     // 执行 LangChain 规划
-    const startedAt = performance.now();
     const planResult = await deps.planner.plan(state.messages, state.tools, {
       model: deps.agentModel,
-      signal: deps.signal,
-      onDelta: deps.onDelta,
-      resetDelta: deps.resetDelta,
-    }).catch(async error => {
-      // 失败轮次也要可观测，且不把供应商异常原文或凭据写入 Trace。
-      if (!deps.signal?.aborted) await deps.recordStep?.({
-        type: 'plan', node: 'plan', planner: 'langchain', iteration: currentIteration,
-        modelDurationMs: Math.round(performance.now() - startedAt),
-        error: { code: 'MODEL_FAILED', message: 'Agent model call failed' }, timestamp: new Date().toISOString(),
-      });
-      throw error;
     });
-    deps.signal?.throwIfAborted();
 
-    const duration = Math.round(performance.now() - startedAt);
-    // 两条分支都回填模型原始消息，以保留下一轮工具应答关联。
-    const nextMessages = [...state.messages];
-    if (planResult.response) nextMessages.push(planResult.response);
-
+    // 分支一：规划出调用工具
     if (planResult.toolCalls && planResult.toolCalls.length > 0) {
-      const planSteps = planResult.toolCalls.map(call => buildPlanToolStep(currentIteration, call));
-      // 同一模型响应可能声明多个工具，只记一次该轮用量。
-      planSteps[0].modelDurationMs = duration;
-      if (planResult.usage) planSteps[0].usage = planResult.usage;
-      for (const step of planSteps) {
-        await deps.recordStep?.(step);
+      const firstCall = planResult.toolCalls[0];
+      const planStep = buildPlanToolStep(currentIteration, firstCall);
+
+      if (deps.recordStep) {
+        await deps.recordStep(planStep);
+      }
+
+      const nextMessages = [...state.messages];
+      if (planResult.response) {
+        nextMessages.push(planResult.response);
       }
 
       return {
@@ -254,15 +224,22 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
         messages: nextMessages,
         toolCalls: planResult.toolCalls,
         finalAnswer: undefined,
-        steps: planSteps,
+        steps: [planStep],
       };
     }
 
+    // 分支二：直接产出最终回答
     const finalOutput = planResult.finalAnswer ?? '';
     const planStep = buildPlanFinalStep(currentIteration, finalOutput);
-    planStep.modelDurationMs = duration;
-    if (planResult.usage) planStep.usage = planResult.usage;
-    await deps.recordStep?.(planStep);
+
+    if (deps.recordStep) {
+      await deps.recordStep(planStep);
+    }
+
+    const nextMessages = [...state.messages];
+    if (planResult.response) {
+      nextMessages.push(planResult.response);
+    }
 
     return {
       iteration: currentIteration,
@@ -278,40 +255,36 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
  * 构造 execute 节点处理函数
  *
  * 【核心逻辑】
- * 顺序执行当前轮的工具调用，让有副作用的工具保持模型给出的调用顺序。
+ * 1. 从当前状态提取首个待执行工具调用 `toolCalls[0]`；
+ * 2. 调度 `ExecutorService.execute` 执行具体业务 Skill 或通用 Tool；
+ * 3. 记录带有 `node: 'execute'` 观测标识的执行步骤；
+ * 4. 保存 `executionResult` 供后续 observe 节点提取。
  *
  * @param deps 外部注入的依赖服务与回调
  * @returns 节点处理异步函数
  */
 export function createExecuteNode(deps?: Partial<AgentGraphDeps>) {
   return async (state: AgentStateType): Promise<AgentStateUpdate> => {
-    if (!deps?.executor) {
+    const toolCall = state.toolCalls?.[0];
+    if (!toolCall || !deps?.executor) {
       return {};
     }
 
-    // 只有从审批快照进入 execute 时才带已完成的本轮结果。
-    const executionResults = [...(state.executionResults ?? [])];
-    const steps: GraphStep[] = [];
-    for (const call of (state.toolCalls ?? []).slice(executionResults.length)) {
-      deps.signal?.throwIfAborted();
-      const result = deps.executeCall ? await deps.executeCall(state, call, executionResults) : await deps.executor.execute(
-        call.name,
-        call.args,
-        { ...deps.context, runId: deps.runId, agent: deps.agentName, signal: deps.signal },
-        deps.allowed,
-      );
-      // 暂停时保留已完成的调用结果。等到本批工具全部有应答之后，observe 才统一续写消息。
-      if (!result) return { waiting: true, executionResults, steps };
-      deps.signal?.throwIfAborted();
-      executionResults.push({ call, result });
-      const step = buildExecutionStep(state.iteration, call, result);
-      steps.push(step);
-      await deps.recordStep?.(step);
+    const execution = await deps.executor.execute(
+      toolCall.name,
+      toolCall.args,
+      { runId: deps.runId ?? '', agent: deps.agentName ?? '' },
+    );
+
+    const executionStep = buildExecutionStep(state.iteration, toolCall, execution);
+
+    if (deps.recordStep) {
+      await deps.recordStep(executionStep);
     }
 
     return {
-      executionResults,
-      steps,
+      executionResult: execution,
+      steps: [executionStep],
     };
   };
 }
@@ -323,31 +296,49 @@ export function createExecuteNode(deps?: Partial<AgentGraphDeps>) {
  * 1. 提取执行结果并安全构建 observation 事实数据；
  * 2. 构造规范的 `role: 'tool'` 消息回填至历史上下文；
  * 3. 记录带有 `node: 'observe'` 观测标识的观察步骤；
- * 4. 清空当轮调用与结果，准备进入下一轮 plan。
+ * 4. 重置 `toolCalls` 与 `executionResult`，准备进入下一轮 plan。
  *
  * @param deps 外部注入的依赖服务与回调
  * @returns 节点处理异步函数
  */
 export function createObserveNode(deps?: Partial<AgentGraphDeps>) {
   return async (state: AgentStateType): Promise<AgentStateUpdate> => {
-    deps?.signal?.throwIfAborted();
-    const toolMessages: LlmToolMessage[] = [];
+    const toolCall = state.toolCalls?.[0];
+    const execution = state.executionResult;
+    if (!toolCall || !execution) {
+      return {
+        toolCalls: undefined,
+        executionResult: undefined,
+      };
+    }
+
+    const observation = execution.error
+      ? { error: execution.error }
+      : { output: execution.output };
+    const toolCallId = toolCall.id ?? `call-${state.iteration}`;
+
+    // OpenAI 规范回填 tool 消息
+    const toolMessage: LlmToolMessage = {
+      role: 'tool',
+      tool_call_id: toolCallId,
+      content: serializeObservation(observation),
+    };
+
+    const nextMessages = [...state.messages, toolMessage];
     const newSteps: GraphStep[] = [];
-    for (const { call, result } of state.executionResults ?? []) {
-      // 上游要求每个 tool_call 都有同 ID 的应答，包括被拒绝和执行失败的调用。
-      const observation = result.error ? { error: result.error } : { output: result.output };
-      toolMessages.push({ role: 'tool', tool_call_id: call.id, content: serializeObservation(observation) });
-      if (result.type !== 'observe') {
-        const step = buildObserveStep(state.iteration, result.name, observation, call.id);
-        newSteps.push(step);
-        await deps?.recordStep?.(step);
+
+    if (execution.type !== 'observe') {
+      const observeStep = buildObserveStep(state.iteration, execution.name, observation, toolCallId);
+      if (deps?.recordStep) {
+        await deps.recordStep(observeStep);
       }
+      newSteps.push(observeStep);
     }
 
     return {
-      messages: [...state.messages, ...toolMessages],
+      messages: nextMessages,
       toolCalls: undefined,
-      executionResults: [],
+      executionResult: undefined,
       steps: newSteps,
     };
   };
@@ -372,11 +363,10 @@ export function routeAfterPlan(state: AgentStateType): string {
  * 【图拓扑结构】
  * 1. 节点：plan、execute、observe
  * 2. 边：
- *    - START -> plan（新运行）或 execute（审批恢复）
+ *    - START -> plan
  *    - plan -> execute（当有 toolCalls 时）
- *    - plan -> END（当产出 finalAnswer 或达到执行上限时）
- *    - execute -> observe（本轮每个工具均已有执行或拒绝结果）
- *    - execute -> END（等待审批，由编排器在图退出后持久化快照）
+ *    - plan -> END（当产出 finalAnswer 或达到迭代轮次刹车时）
+ *    - execute -> observe
  *    - observe -> plan
  * 3. 计数刹车：
  *    采用 state.iteration 对比 state.maxIterations 计数刹车，不依赖底层 node-visit recursionLimit。
@@ -389,12 +379,12 @@ export function createAgentGraph(deps?: Partial<AgentGraphDeps>) {
     .addNode('plan', createPlanNode(deps))
     .addNode('execute', createExecuteNode(deps))
     .addNode('observe', createObserveNode(deps))
-    .addConditionalEdges(START, state => state.resume ? 'execute' : 'plan', { plan: 'plan', execute: 'execute' })
+    .addEdge(START, 'plan')
     .addConditionalEdges('plan', routeAfterPlan, {
       execute: 'execute',
       [END]: END,
     })
-    .addConditionalEdges('execute', state => state.waiting ? END : 'observe', { observe: 'observe', [END]: END })
+    .addEdge('execute', 'observe')
     .addEdge('observe', 'plan')
     .compile();
 }

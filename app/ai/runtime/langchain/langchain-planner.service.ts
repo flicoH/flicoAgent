@@ -1,10 +1,7 @@
-import { normalizeTokenUsage } from '../internal/token-usage';
 import { Injectable } from '@nestjs/common';
-import { randomUUID } from 'node:crypto';
 import type { ChatOpenAI } from '@langchain/openai';
 import {
   AIMessage,
-  AIMessageChunk,
   BaseMessage,
   HumanMessage,
   SystemMessage,
@@ -16,7 +13,6 @@ import type {
   LlmAssistantMessage,
   LlmMessage,
   LlmProvider,
-  TokenUsage,
 } from '../../contracts';
 import { resolveLlm } from '../internal/load-llm-config';
 
@@ -37,7 +33,6 @@ export interface LangChainToolCall {
  * 严格互斥产出：toolCalls（调用工具）或 finalAnswer（最终答案）
  */
 export interface LangChainPlanResult {
-  usage?: TokenUsage;
   /** 若模型判定需要执行能力，返回待调用的工具指令列表 */
   toolCalls?: LangChainToolCall[];
   /** 若模型认为信息足够回答，返回最终文本结论 */
@@ -46,13 +41,6 @@ export interface LangChainPlanResult {
   response?: LlmAssistantMessage;
   /** 明确标识由 LangChain 规划器驱动 */
   planner: 'langchain';
-}
-
-interface PlanOptions {
-  model?: string;
-  signal?: AbortSignal;
-  onDelta?: (content: string) => Promise<void> | void;
-  resetDelta?: () => Promise<void> | void;
 }
 
 /**
@@ -168,7 +156,8 @@ export function toLangChainMessages(messages: (LlmMessage | BaseMessage)[]): Bas
  * 在 LangGraph 编排循环中担任核心推理大脑：
  * 1. 采用 LangChain ChatOpenAI + `bindTools` 机制将白名单内的工具注入大模型调用上下文；
  * 2. 规划决策单轮原子输出：要么产出 `toolCalls`，要么给出 `finalAnswer`；
- * 3. 在规划步骤中明确注入 `planner: 'langchain'` 标识。
+ * 3. 在规划步骤中明确注入 `planner: 'langchain'` 标识；
+ * 4. 通过 use 配置的 Provider 直接使用框架对话协议。
  */
 @Injectable()
 export class LangChainPlannerService {
@@ -187,7 +176,9 @@ export class LangChainPlannerService {
    */
   getModel(modelName?: string): ChatOpenAI {
     const resolved = resolveLlm(this.config, modelName);
-    if (resolved.kind === 'custom') throw new Error('The configured provider does not expose a LangChain model');
+    if (resolved.kind === 'custom') {
+      throw new Error('The configured LLM provider does not expose a ChatOpenAI model');
+    }
     return resolved.model;
   }
 
@@ -214,157 +205,94 @@ export class LangChainPlannerService {
    * @returns LangChainPlanResult（包含 toolCalls 或 finalAnswer，以及 planner='langchain'）
    */
   async plan(
-    messages: (LlmMessage | BaseMessage)[],
+    messages: LlmMessage[],
     tools: StructuredTool[],
-    options: PlanOptions = {},
+    options: { model?: string } = {},
   ): Promise<LangChainPlanResult> {
     const resolved = resolveLlm(this.config, options.model);
     if (resolved.kind === 'custom') {
-      const result = await this.planWithProvider(resolved.provider, messages, tools, options);
-      await this.reconcileStream(result.finalAnswer, '', options);
-      return result;
+      return this.planWithProvider(resolved.provider, messages, tools);
     }
 
+    // 1. 转换消息为 LangChain 标准消息体系
     const lcMessages = toLangChainMessages(messages);
+    // 2. 绑定工具并触发模型推理
     const boundModel = this.bindTools(tools, resolved.model);
 
-    let completion: { message: AIMessage; emitted: string };
+    let rawResponse: unknown;
     try {
-      completion = options.onDelta
-        ? await this.collectStream(await boundModel.stream(lcMessages, { signal: options.signal }), options.onDelta)
-        : { message: await boundModel.invoke(lcMessages, { signal: options.signal }), emitted: '' };
+      rawResponse = await boundModel.invoke(lcMessages);
     } catch (err: unknown) {
-      options.signal?.throwIfAborted();
-      throw this.createInvocationError(resolved.model, err);
+      const error = err as Error;
+      const targetEndpoint = resolved.model.clientConfig.baseURL || 'https://api.openai.com/v1';
+
+      const planError = new Error(
+        `LangChain planner invocation failed for model "${resolved.model.model}" ` +
+        `at endpoint "${targetEndpoint}": ${error?.message || String(err)}`,
+      );
+      (planError as unknown as { cause?: unknown }).cause = err;
+      throw planError;
     }
 
-    const result = this.parsePlan(completion.message);
-    await this.reconcileStream(result.finalAnswer, completion.emitted, options);
-    const usage = completion.message.usage_metadata;
-    const tokens = normalizeTokenUsage(usage?.input_tokens, usage?.output_tokens, usage?.total_tokens);
-    return tokens ? { ...result, usage: tokens } : result;
-  }
+    const aiMessage = rawResponse as AIMessage;
 
-  /**
-   * 合并模型片段，返回完整消息和已经发送的文本。
-   * 发现工具调用后暂停发送文本。以 JSON 对象或代码围栏开头的内容留到整轮解析。
-   */
-  private async collectStream(
-    stream: AsyncIterable<AIMessageChunk>,
-    onDelta: NonNullable<PlanOptions['onDelta']>,
-  ): Promise<{ message: AIMessage; emitted: string }> {
-    let combined: AIMessageChunk | undefined;
-    let text = '';
-    let emitted = '';
-    let hasToolCalls = false;
-    for await (const chunk of stream) {
-      combined = combined ? combined.concat(chunk) : chunk;
-      hasToolCalls ||= Boolean(chunk.tool_call_chunks?.length || chunk.tool_calls?.length);
-      text += this.extractContentString(chunk.content);
-      // JSON 兜底规划指令需要等完整消息解析，暂缓将其显示为回答。
-      const leadingText = text.trimStart();
-      if (!hasToolCalls && text.length > emitted.length && leadingText && !/^[{`]/.test(leadingText)) {
-        await onDelta(text.slice(emitted.length));
-        emitted = text;
-      }
-    }
-    return { message: combined ?? new AIMessage(''), emitted };
-  }
-
-  /** 两种调用模式共用解析规则，优先使用原生工具调用，再尝试 JSON 兜底。 */
-  private parsePlan(aiMessage: AIMessage): LangChainPlanResult {
+    // 3. 优先解析原生 tool_calls（兼顾 aiMessage.tool_calls 与 additional_kwargs）
     const rawToolCalls = (Array.isArray(aiMessage.tool_calls) && aiMessage.tool_calls.length > 0)
       ? aiMessage.tool_calls
       : this.extractAdditionalToolCalls(aiMessage);
 
-    if (rawToolCalls.length > 0) return this.handleNativeToolCalls(rawToolCalls, aiMessage.content);
+    if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+      return this.handleNativeToolCalls(rawToolCalls, aiMessage.content);
+    }
+
+    // 4. 纯文本输出与 JSON 兜底解析
     const content = this.extractContentString(aiMessage.content);
-    return this.parseJsonFallback(content) ?? {
+    const fallbackResult = this.parseJsonFallback(content);
+    if (fallbackResult) {
+      return fallbackResult;
+    }
+
+    // 5. 直接产出最终回答
+    return {
       finalAnswer: content,
       response: { role: 'assistant', content },
       planner: 'langchain',
     };
   }
 
-  /**
-   * 如果已发送的文本仍是最终答案的前缀，只补发剩余部分。
-   * 如果模型转为调用工具或最终答案与此前文本不一致，先发出重置信号。
-   */
-  private async reconcileStream(answer: string | undefined, emitted: string, options: PlanOptions): Promise<void> {
-    if (emitted && !answer?.startsWith(emitted)) {
-      await options.resetDelta?.();
-      emitted = '';
-    }
-    if (answer && answer.length > emitted.length) {
-      await options.onDelta?.(answer.slice(emitted.length));
-    }
-  }
-
   private async planWithProvider(
     provider: LlmProvider,
-    messages: (LlmMessage | BaseMessage)[],
+    messages: LlmMessage[],
     tools: StructuredTool[],
-    options: PlanOptions,
   ): Promise<LangChainPlanResult> {
-    options.signal?.throwIfAborted();
-    const result = await provider.chat(messages.map(message => this.toProviderMessage(message)), {
-      tools: tools.map(({ name, description, schema }) => ({
+    const result = await provider.chat(messages, {
+      tools: tools.map((tool) => ({
         type: 'function',
-        function: { name, description, parameters: schema },
-      })),
-      signal: options.signal,
-    });
-    options.signal?.throwIfAborted();
-    if (Symbol.asyncIterator in result) {
-      throw new Error('LLM provider returned a stream for a non-streaming request');
-    }
-
-    const response = result.message ?? { role: 'assistant', content: result.output };
-    const calls = response.tool_calls?.map(call => ({
-      id: call.id,
-      name: call.function.name,
-      args: call.function.arguments,
-    }));
-    let plan: LangChainPlanResult = {
-      finalAnswer: response.content ?? result.output,
-      response,
-      planner: 'langchain',
-    };
-    if (calls?.length) {
-      const toolCalls = this.formatToolCalls(calls);
-      plan = {
-        toolCalls,
-        response: {
-          ...response,
-          tool_calls: response.tool_calls?.map((call, index) => ({ ...call, id: toolCalls[index].id })),
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.schema,
         },
-        planner: 'langchain',
-      };
+      })),
+    });
+    if (Symbol.asyncIterator in result) {
+      throw new Error('Planner requires a non-streaming LLM response');
     }
-    return result.usage ? { ...plan, usage: result.usage } : plan;
-  }
 
-  private toProviderMessage(message: LlmMessage | BaseMessage): LlmMessage {
-    if (!(message instanceof BaseMessage)) return message;
-    const content = this.extractContentString(message.content);
-    if (message instanceof AIMessage) {
-      const calls = message.tool_calls?.length ? message.tool_calls : this.extractAdditionalToolCalls(message);
-      return calls.length
-        ? this.handleNativeToolCalls(calls, content).response!
-        : { role: 'assistant', content };
+    const response: LlmAssistantMessage = result.message ?? {
+      role: 'assistant',
+      content: result.output,
+    };
+    if (response.tool_calls?.length) {
+      const toolCalls = this.formatToolCalls(response.tool_calls.map((call) => ({
+        id: call.id,
+        name: call.function.name,
+        args: call.function.arguments,
+      })));
+      return { toolCalls, response, planner: 'langchain' };
     }
-    if (message instanceof ToolMessage) return { role: 'tool', content, tool_call_id: message.tool_call_id };
-    return { role: message instanceof SystemMessage ? 'system' : 'user', content };
-  }
 
-  /** 保留具体模型，方便排查上游调用错误。 */
-  private createInvocationError(model: ChatOpenAI, cause: unknown): Error {
-    const endpoint = model.clientConfig.baseURL || 'https://api.openai.com/v1';
-    const message = (cause as Error | undefined)?.message || String(cause);
-    return new Error(
-      `LangChain planner invocation failed for model "${model.model}" at endpoint "${endpoint}": ${message}`,
-      { cause },
-    );
+    return { finalAnswer: response.content ?? result.output, response, planner: 'langchain' };
   }
 
   /**
@@ -438,13 +366,11 @@ export class LangChainPlannerService {
   private formatToolCalls(
     rawToolCalls: Array<{ id?: string; name: string; args?: unknown }>,
   ): LangChainToolCall[] {
-    const ids = new Set<string>();
-    return rawToolCalls.map(tc => {
-      // 兼容没有工具 ID 的模型，保证同轮多调用的回填 ID 唯一。
-      const id = tc.id && !ids.has(tc.id) ? tc.id : `call-${randomUUID()}`;
-      ids.add(id);
-      return { id, name: tc.name, args: this.parseToolCallArgs(tc.args) };
-    });
+    return rawToolCalls.map((tc) => ({
+      id: tc.id ?? `call-${Date.now()}`,
+      name: tc.name,
+      args: this.parseToolCallArgs(tc.args),
+    }));
   }
 
   /**
@@ -458,7 +384,7 @@ export class LangChainPlannerService {
       try {
         return JSON.parse(rawArgs);
       } catch {
-        return rawArgs;
+        return extractJson(rawArgs) ?? {};
       }
     }
     return rawArgs ?? {};
@@ -475,9 +401,7 @@ export class LangChainPlannerService {
       return content;
     }
     if (Array.isArray(content)) {
-      return content.map(block => typeof block === 'string'
-        ? block
-        : block?.type === 'text' && typeof block.text === 'string' ? block.text : '').join('');
+      return JSON.stringify(content);
     }
     return String(content ?? '');
   }
@@ -501,7 +425,7 @@ export class LangChainPlannerService {
 
     // 命中约定工具调用：{"action":"call", "name":..., "input":...}
     if (isCallAction && typeof parsedJson.name === 'string' && parsedJson.name) {
-      const toolCallId = `fallback-${randomUUID()}`;
+      const toolCallId = `fallback-${Date.now()}`;
       const input = parsedJson.input ?? {};
       const assistantMessage: LlmAssistantMessage = {
         role: 'assistant',

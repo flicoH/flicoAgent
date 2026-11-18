@@ -2,62 +2,56 @@ import {
   BadRequestException,
   Body,
   Controller,
-  ForbiddenException,
   Get,
   HttpException,
   HttpStatus,
   Param,
   Post,
-  Req,
   Res,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { ConfigService } from '../config/config.service';
 import { AgentScannerService } from './agent/agent-scanner.service';
-import type { AiRequest } from './ai-access';
-import { AgentRunRequestBody } from './ai.dto';
-import { canReadRun, runSummary } from './run-http';
-import { respondWithSse, sendRuntimeEvent } from './sse-response';
-import { resolveMaxIterations } from './runtime/internal/load-runtime-config';
-import { LangGraphOrchestratorService, publicResult } from './runtime/langgraph/langgraph-orchestrator.service';
-import type { RunResult } from './contracts';
+import { resolveThreadEnabled } from './memory/internal/load-memory-config';
+import { LangGraphOrchestratorService } from './runtime/langgraph/langgraph-orchestrator.service';
+import { RunResult, RuntimeEvent } from './contracts';
 import { ToolRegistryService } from './tool/tool-registry.service';
 import { TraceService } from './trace/trace.service';
 
 /**
- * 同步和流式入口共用请求校验。在打开 SSE 响应前完成授权检查。
+ * Agent 运行通用请求体定义
+ */
+interface AgentRunRequest {
+  /** 目标 Agent 的唯一注册名称 */
+  agent: string;
+  /** 初始输入内容（提问或参数对象） */
+  input: unknown;
+  /** 可选会话线程 ID，支持多轮上下文关联 */
+  threadId?: string;
+}
+
+/**
+ * 校验并提取 Agent 运行请求参数
  *
  * @param body 请求体数据
- * @returns 规范化的 AgentRunRequestBody
+ * @returns 规范化的 AgentRunRequest
  * @throws 当 agent 缺失或为空字符串时抛出 BadRequestException
  */
-function resolveAgentRun(body: AgentRunRequestBody, request?: AiRequest): AgentRunRequestBody {
+function resolveAgentRun(body: AgentRunRequest): AgentRunRequest {
   if (!body || typeof body.agent !== 'string' || !body.agent.trim()) {
     throw new BadRequestException('agent is required');
-  }
-  if (body.input === undefined) {
-    throw new BadRequestException('input is required');
   }
   const threadId = typeof body.threadId === 'string' && body.threadId.trim()
     ? body.threadId.trim()
     : undefined;
-  const agent = body.agent.trim();
-  assertAllowed(agent, request?.aiAccess?.agents);
-  return { agent, input: body.input, ...(threadId ? { threadId } : {}) };
-}
-
-/** 未配置白名单时沿用调用方的默认权限，空白名单表示无权调用。 */
-function assertAllowed(name: string, allowed?: readonly string[]): void {
-  if (allowed !== undefined && (!Array.isArray(allowed) || !allowed.includes(name))) {
-    throw new ForbiddenException('AI capability is not allowed');
-  }
+  return { agent: body.agent.trim(), input: body.input, ...(threadId ? { threadId } : {}) };
 }
 
 /**
  * AI 综合控制器 (AiController)
  *
  * 【安全与鉴权机制】
- * 路由挂载于 `/api/ai/*`，受全局 `ApiSignGuard` 保护，由业务授权或服务端请求签名确认身份，
+ * 路由挂载于 `/api/ai/*`，受框架全局 `ApiSignGuard` 校验保护（施工单密钥 + 时间戳签名），
  * 不进入免签白名单，确保线上生产调用的安全性。
  *
  * 【接口能力分布】
@@ -69,6 +63,7 @@ function assertAllowed(name: string, allowed?: readonly string[]): void {
  *    - GET `/api/ai/trace/:runId`：获取指定运行的完整步骤与事实记录
  * 3. 元数据资产查询：
  *    - GET `/api/ai/agent/list`：查询已注册 Agent 声明列表
+ *    - GET `/api/ai/agent/config`：查询是否启用多轮会话
  *    - GET `/api/ai/tool/list`：查询已注册 Tool 描述列表
  */
 @Controller('api/ai')
@@ -98,11 +93,10 @@ export class AiController {
    */
   @Post('agent/run')
   async runAgent(
-    @Body() body: AgentRunRequestBody,
-    @Req() request?: AiRequest,
+    @Body() body: AgentRunRequest,
   ): Promise<{ success: true; data: RunResult }> {
-    const { agent, input, threadId } = resolveAgentRun(body, request);
-    const result = await this.orchestrator.run(agent, input, undefined, threadId, { scope: request?.aiAccess?.scope, agents: request?.aiAccess?.agents });
+    const { agent, input, threadId } = resolveAgentRun(body);
+    const result = await this.orchestrator.run(agent, input, undefined, threadId);
     return { success: true, data: result };
   }
 
@@ -111,7 +105,7 @@ export class AiController {
    *
    * 【SSE 事件流契约】
    * 1. `event: step`：每当产生 plan, tool, observe, final 步骤时实时推送该步骤数据；
-   * 2. `event: delta`：推送上游增量。若同轮后来出现工具调用，发送 `delta_reset` 清除临时文本；
+   * 2. `event: delta`：模型产出最终答案时按字符流式推送内容片段；
    * 3. `event: done`：流程完全闭合，推送与非流式端点同构的 `{ success: true, data: RunResult }` 载荷（含 threadId）。
    *
    * @param body 请求体
@@ -119,22 +113,23 @@ export class AiController {
    */
   @Post('agent/run/stream')
   async runAgentStream(
-    @Body() body: AgentRunRequestBody,
+    @Body() body: AgentRunRequest,
     @Res() response: Response,
-    @Req() request?: AiRequest,
   ): Promise<void> {
-    const { agent, input, threadId } = resolveAgentRun(body, request);
-    await respondWithSse(response, async (signal, send) => {
-      const result = await this.orchestrator.run(
-        agent, input, event => sendRuntimeEvent(event, send), threadId,
-        { scope: request?.aiAccess?.scope, agents: request?.aiAccess?.agents, signal },
-      );
-      await send('done', { success: true, data: result });
-    });
-  }
+    const { agent, input, threadId } = resolveAgentRun(body);
+    this.initSseResponse(response);
 
-  private isConcreteRunId(id: string) {
-    return /^[a-zA-Z0-9_-]{1,128}$/.test(id) && !['latest', 'runId'].includes(id);
+    const result = await this.orchestrator.run(agent, input, (event: RuntimeEvent) => {
+      if (event.type === 'delta') {
+        this.sendSseEvent(response, 'delta', { content: event.content });
+        return;
+      }
+      this.sendSseEvent(response, 'step', event.step);
+    }, threadId);
+
+    // 推送结束事件并切断流
+    this.sendSseEvent(response, 'done', { success: true, data: result });
+    response.end();
   }
 
   /**
@@ -155,9 +150,9 @@ export class AiController {
    * @throws 若记录不存在，返回业务错误码 40402
    */
   @Get('trace/:runId')
-  async getTrace(@Param('runId') runId: string, @Req() request?: AiRequest) {
-    const run = await this.findTraceOrThrow(runId, request?.aiAccess);
-    return { success: true, data: { ...publicResult(run), ...runSummary(run), input: run.input } };
+  async getTrace(@Param('runId') runId: string) {
+    const run = await this.findTraceOrThrow(runId);
+    return { success: true, data: run };
   }
 
   /**
@@ -174,14 +169,12 @@ export class AiController {
     description: string;
     inputSchema: unknown;
     source?: string;
-    approval?: 'required';
   }> {
-    return this.tools.list().map(({ name, description, inputSchema, source, approval }) => ({
+    return this.tools.list().map(({ name, description, inputSchema, source }) => ({
       name,
       description,
       inputSchema,
       ...(source ? { source } : {}),
-      ...(approval ? { approval } : {}),
     }));
   }
 
@@ -191,15 +184,36 @@ export class AiController {
    * @returns Agent 声明数组
    */
   @Get('agent/list')
-  listAgents(@Req() request?: AiRequest) {
-    const allowed = request?.aiAccess?.agents;
-    return this.agents.list().filter(agent => allowed === undefined || allowed.includes(agent.name));
+  listAgents() {
+    return this.agents.list();
   }
 
-  /** 返回可公开的 Agent 运行配置。 */
   @Get('agent/config')
-  getAgentConfig(): { maxIterations: number } {
-    return { maxIterations: resolveMaxIterations(this.configService) };
+  getAgentConfig(): { threadEnabled: boolean } {
+    return { threadEnabled: resolveThreadEnabled(this.configService) };
+  }
+
+  /**
+   * 初始化标准 SSE (Server-Sent Events) HTTP 响应头
+   *
+   * @param response Express 响应实例
+   */
+  private initSseResponse(response: Response): void {
+    response.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+    response.flushHeaders();
+  }
+
+  /**
+   * 统一向客户端输出指定事件名称与 JSON 序列化数据的 SSE 帧
+   *
+   * @param response Express 响应实例
+   * @param event 事件名称（如 delta, step, done）
+   * @param data 载荷数据
+   */
+  private sendSseEvent(response: Response, event: string, data: unknown): void {
+    response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
   /**
@@ -208,18 +222,15 @@ export class AiController {
    * @param runId 运行标识
    * @returns Trace 记录
    */
-  private async findTraceOrThrow(runId: string, access?: AiRequest['aiAccess']) {
-    // 禁止 HTTP 请求使用全局 latest 别名，以免读取其他调用方最近的运行。
-    const validId = this.isConcreteRunId(runId);
-    const run = validId ? await this.trace.load(runId) : null;
-    if (!run || !canReadRun(run, access)) {
+  private async findTraceOrThrow(runId: string) {
+    const run = await this.trace.load(runId);
+    if (!run) {
       throw new HttpException({
         success: false,
         message: `Trace "${runId}" does not exist`,
         code: 40402,
       }, HttpStatus.OK);
     }
-    return this.orchestrator.refresh(run);
+    return run;
   }
-
 }

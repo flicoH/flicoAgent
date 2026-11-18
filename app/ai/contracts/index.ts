@@ -43,8 +43,6 @@ export interface PlanResult {
  * 执行器单次执行结果 (ExecutionResult)
  */
 export interface ExecutionResult {
-  childRunId?: string;
-  citations?: Citation[];
   /** 命中的能力类别；若在执行前或执行中发生异常则为 'observe' 观察错误 */
   type: 'skill' | 'tool' | 'observe';
   /** 本次执行的能力名称 */
@@ -69,20 +67,12 @@ export interface ExecutionResult {
  * - 'final': 最终输出步骤
  * - 'guardrail': 安全护栏拦截步骤
  */
-export type StepType = 'plan' | 'skill' | 'tool' | 'observe' | 'final' | 'guardrail' | 'approval';
+export type StepType = 'plan' | 'skill' | 'tool' | 'observe' | 'final' | 'guardrail';
 
 /**
  * 运行轨迹中的单个步骤实体 (Step)
  */
 export interface Step {
-  /** 模型调用耗时（毫秒）。并列工具调用只记一次。 */
-  modelDurationMs?: number;
-  /** 委派成功建立的子运行标识。 */
-  childRunId?: string;
-  /** 只有真实知识库检索步骤才携带候选来源。 */
-  citations?: Citation[];
-  /** 单次模型调用的用量。同轮多个工具步骤只在第一条 plan 记录。 */
-  usage?: TokenUsage;
   /** 步骤类型 */
   type: StepType;
   /** 所在循环轮次（从 1 开始递增） */
@@ -107,47 +97,10 @@ export interface Step {
 }
 
 /**
- * 运行生命周期。queued 可来自首次提交或审批后重新入队，waiting_approval 可恢复。
- * succeeded、failed、cancelled、interrupted 是终态。
- * interrupted 表示旧工作实例离开时仍有未完成的排队或执行记录。
+ * Agent 运行对外输出的稳定响应合同 (RunResult)
+ * 【重要】：runId、output、steps、threadId 字段名称在合同中严格锁死，不得变更
  */
-export type RunStatus = 'queued' | 'running' | 'waiting_approval' | 'succeeded'
-  | 'failed' | 'cancelled' | 'interrupted';
-
-/** 将答案里的引用标记映射到具体知识库文档和切片。 */
-export interface Citation {
-  /** 正文中 [cite:…] 的标记值，同时反映切片 ID 与文字版本。 */
-  ref: string;
-  docId: string;
-  /** 用于查询当前索引的切片 ID，旧版本文本保存在原运行的检索步骤中。 */
-  chunkId: string;
-  /** 本次检索的相似度分数。 */
-  score: number;
-}
-
-/** 等待审批的单条能力调用，供调用方展示并确认参数。 */
-export interface PendingApproval {
-  /** 决策只对该 ID 指向的当前调用生效，同一次运行可依次产生多个审批 ID。 */
-  id: string;
-  name: string;
-  kind: 'skill' | 'tool';
-  input: unknown;
-}
-
-/** Agent 对外响应。同步和即时 SSE 共用 runId、output、steps、threadId 四个稳定字段。 */
 export interface RunResult {
-  /** 旧 Trace 可能缺少状态，读接口根据已有终态步骤推断。 */
-  status?: RunStatus;
-  /** 对外的运行级失败原因，具体失败步骤可从 steps 查询。 */
-  failure?: { code: string; message: string };
-  /** 已记录规划调用的累计耗时，子运行各自计量。 */
-  modelDurationMs?: number;
-  /** 正文使用且能追溯到可信检索结果的引用，按标记首次出现的顺序返回。 */
-  citations?: Citation[];
-  /** 仅在等待人工决定时提供。 */
-  approval?: PendingApproval;
-  /** 本次运行中模型已报告的 token 用量之和。 */
-  usage?: TokenUsage;
   /** 本次运行的唯一 ID */
   runId: string;
   /** Agent 产出的最终文本结论 */
@@ -162,14 +115,6 @@ export interface RunResult {
  * 持久化存储的完整运行链路实体 (TraceRun)
  */
 export interface TraceRun extends RunResult {
-  /** 内部恢复快照，由 HTTP 输出层剔除。 */
-  continuation?: import('../runtime/internal/run-continuation').RunContinuation;
-  /** 进程标识用于识别重启前留下的非终态。 */
-  workerId?: string;
-  parentRunId?: string;
-  rootRunId?: string;
-  /** HTTP 调用方的资源命名空间。旧记录可由业务显式迁移。 */
-  scope?: string;
   /** 执行本次运行的 Agent 名称 */
   agent: string;
   /** 调用方传入的初始入参 */
@@ -187,9 +132,7 @@ export interface TraceRun extends RunResult {
  * - step: 步骤完成事件（通知客户端当前处于哪个 plan/tool/final 阶段）
  */
 export type RuntimeEvent =
-  | { type: 'start'; runId: string; threadId: string }
   | { type: 'delta'; content: string }
-  | { type: 'delta_reset' }
   | { type: 'step'; step: Step };
 
 /**
@@ -259,7 +202,6 @@ export type LlmMessage = LlmTextMessage | LlmAssistantMessage | LlmToolMessage;
  * 非流式模型调用的结构化返回结果
  */
 export interface LlmChatResult {
-  usage?: TokenUsage;
   /** 简化、纯净的最终文本输出 */
   output: string;
   /** 原始 assistant 消息（含 tool_calls 等元数据），用于回放与多轮会话状态维护 */
@@ -270,16 +212,12 @@ export interface LlmChatResult {
  * 单次模型调用时的可选参数覆盖项
  */
 export interface LlmChatOptions {
-  /** 流式用量单独回调，文本迭代器继续只产出字符串。 */
-  onUsage?: (usage: TokenUsage) => void;
   /** 指定使用的模型配置名称（对应 ai.llm.models 中的 key）；未指定时采用 ai.llm.default */
   model?: string;
   /** 透传给模型的工具/函数定义清单（OpenAI tools 格式） */
   tools?: unknown[];
   /** 是否启用流式输出：true 时返回 AsyncIterable<string>，false 时返回 Promise<LlmChatResult> */
   stream?: boolean;
-  /** SSE 连接断开时取消仍在进行的上游调用。 */
-  signal?: AbortSignal;
 }
 
 /**
@@ -319,13 +257,7 @@ export interface EmbeddingProvider {
   embed(texts: string[]): Promise<number[][]>;
 }
 
-export interface TokenUsage {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-}
-
 export type PlanActionType = PlanAction['type'];
-export type ExecuteResult = ExecutionResult;
 export type ExecuteError = NonNullable<ExecutionResult['error']>;
+export type ExecuteResult = ExecutionResult;
 export type AgentStreamEvent = RuntimeEvent;

@@ -226,22 +226,22 @@
 [2026-09-11T10:26:00.997] [INFO] dateFile - [GET /api/proj/product/list] headers: {"host":"127.0.0.1:8080","connection":"keep-alive","s_t":"1789093560986","sec-ch-ua-platform":"\"macOS\"","proj_key":"jd","sec-ch-ua":"\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"","sec-ch-ua-mobile":"?0","s_sign":"efe09747bc23a8ee5ddd4d47a4548eb1","user-agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36","accept":"application/json, text/plain, */*","content-type":"application/json;charset=utf-8","sec-fetch-site":"same-origin","sec-fetch-mode":"cors","sec-fetch-dest":"empty","referer":"http://127.0.0.1:8080/view/dashboard/schema?key=product&proj_key=jd","accept-encoding":"gzip, deflate, br, zstd","accept-language":"zh-CN,zh;q=0.9,en;q=0.8"}
 [2026-09-11T10:26:01.007] [INFO] dateFile - {}
 [2026-09-11T10:26:01.008] [ERROR] dateFile - [-- exception --]: ReferenceError: Cannot access 'productList' before initialization
-    at BusinessControll.getList (/Users/flicoh/Downloads/htdocs/flicoH-elips/app/controller/business.js:29:25)
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-router/node_modules/koa-compose/index.js:44:32)
-    at next (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-router/node_modules/koa-compose/index.js:45:18)
-    at /Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-router/lib/router.js:346:16
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-router/node_modules/koa-compose/index.js:44:32)
-    at /Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-router/node_modules/koa-compose/index.js:36:12
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-router/lib/router.js:351:31)
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-compose/index.js:42:32)
-    at /Users/flicoh/Downloads/htdocs/flicoH-elips/app/middleware/project-handler.js:33:11
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-compose/index.js:42:32)
-    at /Users/flicoh/Downloads/htdocs/flicoH-elips/app/middleware/api-params-verify.js:78:11
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-compose/index.js:42:32)
-    at /Users/flicoh/Downloads/htdocs/flicoH-elips/app/middleware/api-sign-verify.js:40:11
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-compose/index.js:42:32)
-    at /Users/flicoh/Downloads/htdocs/flicoH-elips/app/middleware/error-hander.js:19:13
-    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-elips/node_modules/koa-compose/index.js:42:32)
+    at BusinessControll.getList (/Users/flicoh/Downloads/htdocs/flicoH-agent/app/controller/business.js:29:25)
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-router/node_modules/koa-compose/index.js:44:32)
+    at next (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-router/node_modules/koa-compose/index.js:45:18)
+    at /Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-router/lib/router.js:346:16
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-router/node_modules/koa-compose/index.js:44:32)
+    at /Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-router/node_modules/koa-compose/index.js:36:12
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-router/lib/router.js:351:31)
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-compose/index.js:42:32)
+    at /Users/flicoh/Downloads/htdocs/flicoH-agent/app/middleware/project-handler.js:33:11
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-compose/index.js:42:32)
+    at /Users/flicoh/Downloads/htdocs/flicoH-agent/app/middleware/api-params-verify.js:78:11
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-compose/index.js:42:32)
+    at /Users/flicoh/Downloads/htdocs/flicoH-agent/app/middleware/api-sign-verify.js:40:11
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-compose/index.js:42:32)
+    at /Users/flicoh/Downloads/htdocs/flicoH-agent/app/middleware/error-hander.js:19:13
+    at dispatch (/Users/flicoh/Downloads/htdocs/flicoH-agent/node_modules/koa-compose/index.js:42:32)
 [2026-09-11T10:26:01.008] [ERROR] dateFile - [-- exception --]: undefined Cannot access 'productList' before initialization undefined
 [2026-09-11T10:27:17.820] [INFO] dateFile - [ViewController] query: {"key":"product","proj_key":"jd"}
 [2026-09-11T10:27:17.821] [INFO] dateFile - [ViewController] params: undefined

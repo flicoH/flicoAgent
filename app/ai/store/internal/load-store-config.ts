@@ -1,13 +1,3 @@
-/*
- * ********************************************************************************************** 
- *  CopyRight (C) 2026 huangqinjia(flicoH)。 
- *  Rights Reserved. 
- *  其他任何个人、公司不得使用、复制、传播、修改或商业使用。
- * **********************************************************************************************
- * @Date: 2026-10-24 00:23:30
- * @LastEditors: flicoH
- * @LastEditTime: 2026-11-14 00:34:54
- */
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { ConfigService } from '../../../config/config.service';
@@ -31,7 +21,7 @@ interface AiStoreConfig {
  *
  * 【解析规则】
  * 1. 从配置中读取 `ai.store.trace`；
- * 2. 若未配置或为空字符串，检查工作目录下是否存在 `data/trace` 或 `.agent/trace`，默认使用 `data/trace`；
+ * 2. 若未配置或为空字符串，检查工作目录下是否存在 `data/trace` 或 `.elpis/trace`，默认使用 `data/trace`；
  * 3. 通过 `path.resolve(process.cwd(), tracePath)` 将相对路径锚定至当前业务工程工作目录；若本身已是绝对路径则保持不变。
  *
  * @param config 全局配置服务
@@ -44,14 +34,14 @@ export function resolveTraceStorePath(config: ConfigService): string {
   }
 
   const dataTrace = resolve(process.cwd(), 'data/trace');
-  const agentTrace = resolve(process.cwd(), '.agent/trace');
+  const elpisTrace = resolve(process.cwd(), '.elpis/trace');
   if (existsSync(dataTrace)) {
     return dataTrace;
   }
-  if (existsSync(agentTrace)) {
-    return agentTrace;
+  if (existsSync(elpisTrace)) {
+    return elpisTrace;
   }
-  // 默认使用 data/trace（契合 agent-demo 规范标准）
+  // 默认使用 data/trace（契合 elpis-demo 规范标准）
   return dataTrace;
 }
 
