@@ -69,10 +69,22 @@ export interface ExecutionResult {
  */
 export type StepType = 'plan' | 'skill' | 'tool' | 'observe' | 'final' | 'guardrail';
 
+/** 模型供应商报告的单轮用量，或同一次运行中已上报用量的合计。 */
+export interface TokenUsage {
+  /** 输入消息、历史上下文和工具定义等消耗的 token。 */
+  inputTokens: number;
+  /** 模型生成内容消耗的 token。 */
+  outputTokens: number;
+  /** 供应商报告的总 token，汇总时按轮累加。 */
+  totalTokens: number;
+}
+
 /**
  * 运行轨迹中的单个步骤实体 (Step)
  */
 export interface Step {
+  /** 模型调用用量。null 表示本轮未上报，缺省表示步骤未记录模型调用。 */
+  usage?: TokenUsage | null;
   /** 步骤类型 */
   type: StepType;
   /** 所在循环轮次（从 1 开始递增） */
@@ -101,6 +113,8 @@ export interface Step {
  * 【重要】：runId、output、steps、threadId 字段名称在合同中严格锁死，不得变更
  */
 export interface RunResult {
+  /** 本次运行已记录的模型用量汇总 */
+  usage?: TokenUsage;
   /** 本次运行的唯一 ID */
   runId: string;
   /** Agent 产出的最终文本结论 */
@@ -202,6 +216,8 @@ export type LlmMessage = LlmTextMessage | LlmAssistantMessage | LlmToolMessage;
  * 非流式模型调用的结构化返回结果
  */
 export interface LlmChatResult {
+  /** 由模型供应商返回的实际 token 用量 */
+  usage?: TokenUsage;
   /** 简化、纯净的最终文本输出 */
   output: string;
   /** 原始 assistant 消息（含 tool_calls 等元数据），用于回放与多轮会话状态维护 */

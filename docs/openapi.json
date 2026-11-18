@@ -456,6 +456,44 @@
         }
       }
     },
+    "/api/ai/trace/{runId}/usage": {
+      "get": {
+        "summary": "查询单次 Agent 运行上报的 token 用量",
+        "parameters": [
+          {"name": "runId", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "成功时返回用量合计，未记录用量时为 null。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "success": {"const": true},
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "runId": {"type": "string"},
+                            "usage": {"oneOf": [{"$ref": "#/components/schemas/TokenUsage"}, {"type": "null"}]}
+                          },
+                          "required": ["runId", "usage"]
+                        }
+                      },
+                      "required": ["success", "data"]
+                    },
+                    {"$ref": "#/components/schemas/Error"}
+                  ]
+                }
+              }
+            }
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"}
+        }
+      }
+    },
     "/api/ai/trace/{runId}": {
       "get": {
         "summary": "读取授权范围内的 Trace",
@@ -686,7 +724,7 @@
       "Step": {
         "type": "object",
         "properties": {
-          "usage": {"$ref": "#/components/schemas/TokenUsage"},
+          "usage": {"oneOf": [{"$ref": "#/components/schemas/TokenUsage"}, {"type": "null"}]},
           "type": {"enum": ["plan", "skill", "tool", "observe", "final", "guardrail", "approval"]},
           "iteration": {"type": "integer"},
           "name": {"type": "string"},

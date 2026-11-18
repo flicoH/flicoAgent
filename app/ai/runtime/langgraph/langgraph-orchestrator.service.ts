@@ -14,6 +14,7 @@ import {
 import { SkillScannerService } from '../../skill/skill-scanner.service';
 import { ThreadCheckpoint } from '../../store/store.interface';
 import { ToolRegistryService } from '../../tool/tool-registry.service';
+import { summarizeTokenUsage } from '../../trace/token-usage';
 import { TraceService } from '../../trace/trace.service';
 import { resolveMaxIterations } from '../internal/load-runtime-config';
 import { LangChainPlannerService } from '../langchain/langchain-planner.service';
@@ -174,7 +175,7 @@ export class LangGraphOrchestratorService {
     // 8. 会话检查点保存（若开启）
     await this.persistCheckpoint(threadEnabled, checkpoint, threadId, userInputText, finalOutput);
 
-    return { runId: run.runId, output: finalOutput, steps, threadId };
+    return { runId: run.runId, output: finalOutput, steps, threadId, usage: summarizeTokenUsage(steps) };
   }
 
   /**

@@ -156,6 +156,19 @@ export class AiController {
   }
 
   /**
+   * 按 runId 查询已持久化的 token 用量合计。
+   * 已存在的运行没有用量记录时返回 null，找不到运行时沿用 Trace 查询的错误响应。
+   */
+  @Get('trace/:runId/usage')
+  async getTraceUsage(@Param('runId') runId: string) {
+    const run = await this.findTraceOrThrow(runId);
+    return {
+      success: true,
+      data: { runId: run.runId, usage: run.usage ?? null },
+    };
+  }
+
+  /**
    * 获取当前环境中所有已注册工具 (Tool) 的声明定义列表
    *
    * 【契约保护】

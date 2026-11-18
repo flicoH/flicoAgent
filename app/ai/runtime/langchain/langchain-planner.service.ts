@@ -13,6 +13,7 @@ import type {
   LlmAssistantMessage,
   LlmMessage,
   LlmProvider,
+  TokenUsage,
 } from '../../contracts';
 import { resolveLlm } from '../internal/load-llm-config';
 
@@ -33,6 +34,7 @@ export interface LangChainToolCall {
  * 严格互斥产出：toolCalls（调用工具）或 finalAnswer（最终答案）
  */
 export interface LangChainPlanResult {
+  usage?: TokenUsage;
   /** 若模型判定需要执行能力，返回待调用的工具指令列表 */
   toolCalls?: LangChainToolCall[];
   /** 若模型认为信息足够回答，返回最终文本结论 */
@@ -235,6 +237,13 @@ export class LangChainPlannerService {
     }
 
     const aiMessage = rawResponse as AIMessage;
+    // 读取模型供应商上报的实际用量，保留到规划结果中。
+    const metadata = aiMessage.usage_metadata;
+    const usage = metadata && {
+      inputTokens: metadata.input_tokens,
+      outputTokens: metadata.output_tokens,
+      totalTokens: metadata.total_tokens,
+    };
 
     // 3. 优先解析原生 tool_calls（兼顾 aiMessage.tool_calls 与 additional_kwargs）
     const rawToolCalls = (Array.isArray(aiMessage.tool_calls) && aiMessage.tool_calls.length > 0)
@@ -242,18 +251,19 @@ export class LangChainPlannerService {
       : this.extractAdditionalToolCalls(aiMessage);
 
     if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
-      return this.handleNativeToolCalls(rawToolCalls, aiMessage.content);
+      return { ...this.handleNativeToolCalls(rawToolCalls, aiMessage.content), usage };
     }
 
     // 4. 纯文本输出与 JSON 兜底解析
     const content = this.extractContentString(aiMessage.content);
     const fallbackResult = this.parseJsonFallback(content);
     if (fallbackResult) {
-      return fallbackResult;
+      return { ...fallbackResult, usage };
     }
 
     // 5. 直接产出最终回答
     return {
+      usage,
       finalAnswer: content,
       response: { role: 'assistant', content },
       planner: 'langchain',
@@ -289,10 +299,10 @@ export class LangChainPlannerService {
         name: call.function.name,
         args: call.function.arguments,
       })));
-      return { toolCalls, response, planner: 'langchain' };
+      return { toolCalls, response, planner: 'langchain', usage: result.usage };
     }
 
-    return { finalAnswer: response.content ?? result.output, response, planner: 'langchain' };
+    return { finalAnswer: response.content ?? result.output, response, planner: 'langchain', usage: result.usage };
   }
 
   /**

@@ -1,3 +1,4 @@
+import { isTokenUsage } from '../../trace/token-usage';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import type { LlmToolMessage } from '../../contracts';
 import { ExecutionResult } from '../../contracts';
@@ -205,10 +206,13 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
       model: deps.agentModel,
     });
 
+    // 每轮模型调用只在规划步骤上记录一次，即使该轮请求多个工具。
+    const usage = isTokenUsage(planResult.usage) ? planResult.usage : null;
+
     // 分支一：规划出调用工具
     if (planResult.toolCalls && planResult.toolCalls.length > 0) {
       const firstCall = planResult.toolCalls[0];
-      const planStep = buildPlanToolStep(currentIteration, firstCall);
+      const planStep = { ...buildPlanToolStep(currentIteration, firstCall), usage };
 
       if (deps.recordStep) {
         await deps.recordStep(planStep);
@@ -230,7 +234,7 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
 
     // 分支二：直接产出最终回答
     const finalOutput = planResult.finalAnswer ?? '';
-    const planStep = buildPlanFinalStep(currentIteration, finalOutput);
+    const planStep = { ...buildPlanFinalStep(currentIteration, finalOutput), usage };
 
     if (deps.recordStep) {
       await deps.recordStep(planStep);

@@ -239,6 +239,6 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 
 ### Token 用量
 
-Agent 同步结果、SSE 的 `done` 以及 Trace 返回可选的 `usage`，字段为 `inputTokens`、`outputTokens`、`totalTokens`。每轮模型调用只记录一次，即使该轮执行多个工具。Trace 的 `plan` 步骤可查看单轮用量。
+Agent 同步结果、SSE 的 `done` 和 Trace 记录均可返回 `usage`，包含 `inputTokens`、`outputTokens`、`totalTokens`。每轮模型调用只记录一次，即使该轮请求多个工具。Trace 的规划步骤可查看单轮用量，`usage: null` 表示该轮未上报。自定义 Provider 可通过 `LlmChatResult.usage` 上报用量。
 
-Chat 同步结果也可返回 `usage`。支持流式用量的 OpenAI 兼容模型可配置 `ai.llm.models.<name>.streamUsage: true`，流式统计随 `done` 返回。上游未报告用量时省略字段。多轮统计只累计已报告的调用，数值可能低于实际消耗。
+用 `GET /api/ai/trace/{runId}/usage` 查询单次运行的消耗，返回 `{ success: true, data: { runId, usage } }`。合计只包含模型实际报告的用量。没有已上报数据时，查询接口返回 `usage: null`，包括加入统计之前的运行。

@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { TRACE_STORE, TraceStore } from '../store/store.interface';
 import { Step, TraceRun } from '../contracts';
+import { summarizeTokenUsage } from './token-usage';
 
 /**
  * 运行链路追踪服务 (TraceService)
@@ -61,6 +62,10 @@ export class TraceService {
     }
 
     run.steps.push(step);
+    // 将用量合计随步骤一并持久化，查询时可直接读取。
+    if (step.usage) {
+      run.usage = summarizeTokenUsage(run.steps);
+    }
     // 当该步骤为最终完成步骤或安全拦截步骤且包含文本输出时，同步更新顶层 output 字段
     if ((step.type === 'final' || step.type === 'guardrail') && typeof step.output === 'string') {
       run.output = step.output;

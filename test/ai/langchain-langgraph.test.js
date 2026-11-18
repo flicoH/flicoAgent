@@ -353,12 +353,14 @@ describe('T12: runtime · LangChain Planner · LangGraph 循环', () => {
           if (plannerTurns === 1) {
             return {
               planner: 'langchain',
+              usage: { inputTokens: 12, outputTokens: 3, totalTokens: 15 },
               toolCalls: [{ id: 'call_1', name: 'proj-query', args: { id: 1 } }],
               response: { role: 'assistant', content: 'calling proj-query' },
             };
           }
           return {
             planner: 'langchain',
+            usage: { inputTokens: 20, outputTokens: 5, totalTokens: 25 },
             finalAnswer: 'Project A is active',
             response: { role: 'assistant', content: 'Project A is active' },
           };
@@ -425,6 +427,16 @@ describe('T12: runtime · LangChain Planner · LangGraph 循环', () => {
         },
         'custom-thread-123',
       );
+
+      const usage = { inputTokens: 32, outputTokens: 8, totalTokens: 40 };
+      assert.deepStrictEqual(result.usage, usage);
+      const { AiController } = require("../../dist/ai/ai.controller");
+
+      const controller = new AiController(mockTools, mockAgents, orchestrator, mockTrace, mockConfig);
+      assert.deepStrictEqual(await controller.getTraceUsage(result.runId), {
+        success: true,
+        data: { runId: result.runId, usage },
+      });
 
       // 验证锁死合同三字段 + threadId
       assert.ok(records.has(result.runId));
