@@ -1,3 +1,11 @@
+const AGENT_LOOP_MODES = ['react', 'plan-and-execute', 'reflection'] as const;
+
+export type AgentLoopMode = typeof AGENT_LOOP_MODES[number];
+
+export function isAgentLoopMode(value: unknown): value is AgentLoopMode {
+  return AGENT_LOOP_MODES.some(mode => mode === value);
+}
+
 /**
  * Agent 声明契约 (AgentDefinition)
  *
@@ -9,6 +17,12 @@
  * 执行能力统一由 `Skill`（业务层）和 `Tool`（通用工具层）提供。
  */
 export interface AgentDefinition {
+  /** Agent 循环策略，默认 react。 */
+  mode?: AgentLoopMode;
+
+  /** reflection 允许的最大修订次数，默认 1。 */
+  maxReflectionRevisions?: number;
+
   /**
    * Agent 的唯一注册名称
    * 用于客户端请求（如 POST /api/ai/agent/run）时识别和定位 Agent，禁止重名
@@ -44,4 +58,10 @@ export interface AgentDefinition {
    * 对应 `ai.llm.models` 配置中的模型 key；未指定时默认使用全局 `ai.llm.default`
    */
   model?: string;
+
+  /** 当前 Agent 可直接委派的 Agent 注册名。 */
+  delegates?: string[];
+
+  /** 仅允许经父 Agent 委派运行。 */
+  delegationOnly?: boolean;
 }

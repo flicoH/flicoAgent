@@ -7,14 +7,17 @@ import {
   HttpStatus,
   Param,
   Post,
+  Query,
+  Req,
   Res,
 } from '@nestjs/common';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { ConfigService } from '../config/config.service';
+import { isAgentLoopMode } from './agent/agent.interface';
 import { AgentScannerService } from './agent/agent-scanner.service';
 import { resolveThreadEnabled } from './memory/internal/load-memory-config';
 import { LangGraphOrchestratorService } from './runtime/langgraph/langgraph-orchestrator.service';
-import { RunResult, RuntimeEvent } from './contracts';
+import { AgentRunAccess, RunResult, RuntimeEvent } from './contracts';
 import { ToolRegistryService } from './tool/tool-registry.service';
 import { TraceService } from './trace/trace.service';
 
@@ -94,9 +97,10 @@ export class AiController {
   @Post('agent/run')
   async runAgent(
     @Body() body: AgentRunRequest,
+    @Req() request?: Request,
   ): Promise<{ success: true; data: RunResult }> {
     const { agent, input, threadId } = resolveAgentRun(body);
-    const result = await this.orchestrator.run(agent, input, undefined, threadId);
+    const result = await this.orchestrator.run(agent, input, undefined, threadId, request?.agentRunAccess);
     return { success: true, data: result };
   }
 
@@ -115,17 +119,22 @@ export class AiController {
   async runAgentStream(
     @Body() body: AgentRunRequest,
     @Res() response: Response,
+    @Req() request?: Request,
   ): Promise<void> {
     const { agent, input, threadId } = resolveAgentRun(body);
-    this.initSseResponse(response);
-
     const result = await this.orchestrator.run(agent, input, (event: RuntimeEvent) => {
+      if (!response.headersSent) {
+        this.initSseResponse(response);
+      }
       if (event.type === 'delta') {
         this.sendSseEvent(response, 'delta', { content: event.content });
         return;
       }
       this.sendSseEvent(response, 'step', event.step);
-    }, threadId);
+    }, threadId, request?.agentRunAccess);
+    if (!response.headersSent) {
+      this.initSseResponse(response);
+    }
 
     // 推送结束事件并切断流
     this.sendSseEvent(response, 'done', { success: true, data: result });
@@ -138,8 +147,14 @@ export class AiController {
    * @returns 拓扑结构 { nodes, edges }
    */
   @Get('agent/graph')
-  getAgentGraph(): { nodes: unknown; edges: unknown } {
-    return this.orchestrator.getGraph();
+  getAgentGraph(@Query('mode') mode?: string): { nodes: unknown; edges: unknown } {
+    if (mode === undefined) {
+      return this.orchestrator.getGraph();
+    }
+    if (!isAgentLoopMode(mode)) {
+      throw new BadRequestException('Invalid Agent loop mode');
+    }
+    return this.orchestrator.getGraph(mode);
   }
 
   /**
@@ -150,8 +165,8 @@ export class AiController {
    * @throws 若记录不存在，返回业务错误码 40402
    */
   @Get('trace/:runId')
-  async getTrace(@Param('runId') runId: string) {
-    const run = await this.findTraceOrThrow(runId);
+  async getTrace(@Param('runId') runId: string, @Req() request?: Request) {
+    const run = await this.findTraceOrThrow(runId, request?.agentRunAccess);
     return { success: true, data: run };
   }
 
@@ -160,8 +175,8 @@ export class AiController {
    * 已存在的运行没有用量记录时返回 null，找不到运行时沿用 Trace 查询的错误响应。
    */
   @Get('trace/:runId/usage')
-  async getTraceUsage(@Param('runId') runId: string) {
-    const run = await this.findTraceOrThrow(runId);
+  async getTraceUsage(@Param('runId') runId: string, @Req() request?: Request) {
+    const run = await this.findTraceOrThrow(runId, request?.agentRunAccess);
     return {
       success: true,
       data: { runId: run.runId, usage: run.usage ?? null },
@@ -235,15 +250,16 @@ export class AiController {
    * @param runId 运行标识
    * @returns Trace 记录
    */
-  private async findTraceOrThrow(runId: string) {
+  private async findTraceOrThrow(runId: string, access?: AgentRunAccess) {
     const run = await this.trace.load(runId);
-    if (!run) {
+    if (!run || run.scope !== access?.scope || (access?.agents && !access.agents.includes(run.agent))) {
       throw new HttpException({
         success: false,
         message: `Trace "${runId}" does not exist`,
         code: 40402,
       }, HttpStatus.OK);
     }
-    return run;
+    const { scope, ...trace } = run;
+    return trace;
   }
 }

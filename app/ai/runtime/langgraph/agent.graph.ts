@@ -1,5 +1,6 @@
 import { isTokenUsage } from '../../trace/token-usage';
 import { END, START, StateGraph } from '@langchain/langgraph';
+import type { AgentLoopMode } from '../../agent/agent.interface';
 import type { LlmToolMessage } from '../../contracts';
 import { ExecutionResult } from '../../contracts';
 import { ExecutorService } from '../../tool/executor.service';
@@ -23,12 +24,16 @@ export interface AgentGraphDeps {
   planner: LangChainPlannerService;
   /** 能力执行器服务实例 */
   executor: ExecutorService;
+  executeCall?: (call: LangChainToolCall) => Promise<ExecutionResult>;
+  takeModelCall?: () => boolean;
   /** 运行追踪 ID */
   runId: string;
   /** 当前运行的 Agent 唯一名称 */
   agentName: string;
   /** 可选的模型名称覆盖 */
   agentModel?: string;
+  mode?: AgentLoopMode;
+  maxReflectionRevisions?: number;
   /** 步骤产生时的持久化与实时推送回调钩子 */
   recordStep?: (step: GraphStep) => Promise<void> | void;
 }
@@ -47,22 +52,158 @@ function serializeObservation(value: unknown): string {
   return serialized === undefined ? String(value) : serialized;
 }
 
-/**
- * 构造达到最大迭代轮次时的熔断步骤
- *
- * @param maxIterations 最大迭代上限
- * @param output 熔断说明文本
- * @returns GraphStep 步骤实体
- */
-function buildMaxIterationStep(maxIterations: number, output: string): GraphStep {
-  return {
-    type: 'final',
-    node: 'plan',
-    iteration: maxIterations,
-    output,
-    error: { code: 'MAX_ITERATIONS', message: output },
-    timestamp: new Date().toISOString(),
+async function startModelCall(
+  state: AgentStateType,
+  deps: Partial<AgentGraphDeps>,
+  node: GraphStep['node'],
+): Promise<AgentStateUpdate | undefined> {
+  const iteration = state.iteration + 1;
+  const exceededIterations = iteration > state.maxIterations;
+  if (!exceededIterations && (!deps.takeModelCall || deps.takeModelCall())) {
+    return undefined;
+  }
+
+  const error = exceededIterations
+    ? { code: 'MAX_ITERATIONS', message: `Agent reached the maximum of ${state.maxIterations} iterations` }
+    : { code: 'DELEGATE_BUDGET_EXCEEDED', message: 'Agent tree reached its model call budget' };
+  const output = state.finalAnswer ?? state.previousDraft ?? error.message;
+  const step: GraphStep = {
+    type: 'final', node, iteration: Math.min(iteration, state.maxIterations),
+    output, error, timestamp: new Date().toISOString(),
   };
+  await deps.recordStep?.(step);
+  return { iteration, finalAnswer: output, isMaxIterationError: true, steps: [step] };
+}
+
+function parseJson(text: string): unknown {
+  const fenced = text.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  try {
+    return JSON.parse(fenced?.[1] ?? text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** 规划、审阅和汇总是独立的纯模型阶段，没有工具执行权限。 */
+function createTextStage(
+  node: 'make-plan' | 'review' | 'synthesize',
+  deps: Partial<AgentGraphDeps>,
+  instruction: (state: AgentStateType) => string,
+  interpret: (text: string, state: AgentStateType) => {
+    update: AgentStateUpdate;
+    output?: unknown;
+    error?: GraphStep['error'];
+  },
+) {
+  return async (state: AgentStateType): Promise<AgentStateUpdate> => {
+    if (!deps.planner) {
+      return { finalAnswer: '' };
+    }
+    const halted = await startModelCall(state, deps, node);
+    if (halted) {
+      return halted;
+    }
+
+    const iteration = state.iteration + 1;
+    const result = await deps.planner.plan(
+      [...state.messages, { role: 'user', content: instruction(state) }],
+      [],
+      { model: deps.agentModel },
+    );
+    const text = result.toolCalls?.length ? '' : (result.finalAnswer ?? '');
+    const stage = interpret(text, state);
+    const terminalError = stage.error && node !== 'review';
+    const step: GraphStep = {
+      type: terminalError ? 'final' : 'plan', node, planner: 'langchain', iteration,
+      output: terminalError ? stage.update.finalAnswer : stage.output,
+      error: stage.error,
+      usage: isTokenUsage(result.usage) ? result.usage : null,
+      timestamp: new Date().toISOString(),
+    };
+    await deps.recordStep?.(step);
+    return { ...stage.update, iteration, steps: [step] };
+  };
+}
+
+function taskInstruction(plan: string[], index: number) {
+  return {
+    role: 'user' as const,
+    content: `Work only on step ${index + 1} of ${plan.length}: ${plan[index]}. ` +
+      'Use available tools if necessary, then give the result of this step.',
+  };
+}
+
+function createTaskPlanningNode(deps: Partial<AgentGraphDeps>) {
+  return createTextStage('make-plan', deps, state =>
+    'Create an ordered execution plan for the user request. Return only a JSON array of non-empty step strings. ' +
+    `Use between 1 and ${Math.max(1, state.maxIterations - 2)} steps, fewer if tools may require multiple calls. ` +
+    'Use only these tools if needed during execution: ' + (state.tools.map(tool => tool.name).join(', ') || 'none'),
+  (text, state) => {
+    const plan = parseJson(text);
+    const maxSteps = Math.max(1, state.maxIterations - 2);
+    if (Array.isArray(plan) && plan.length > 0 && plan.length <= maxSteps
+      && plan.every(step => typeof step === 'string' && step.trim())) {
+      return {
+        update: { taskPlan: plan, messages: [...state.messages, taskInstruction(plan, 0)] },
+        output: plan,
+      };
+    }
+    const error = { code: 'INVALID_TASK_PLAN', message: 'Model did not produce a valid execution plan' };
+    return { update: { finalAnswer: error.message }, error };
+  });
+}
+
+function createSynthesisNode(deps: Partial<AgentGraphDeps>) {
+  return createTextStage('synthesize', deps, state =>
+    'Answer the original user request by synthesizing the completed steps and observations. ' +
+    'Report any unresolved issues. Plan: ' + JSON.stringify(state.taskPlan),
+  text => {
+    if (text.trim()) {
+      return { update: { finalAnswer: text }, output: text };
+    }
+    const error = { code: 'INVALID_SYNTHESIS', message: 'Model did not produce a final synthesis' };
+    return { update: { finalAnswer: error.message }, error };
+  });
+}
+
+function createReviewNode(deps: Partial<AgentGraphDeps>) {
+  const maxRevisions = deps.maxReflectionRevisions ?? 1;
+  return createTextStage('review', deps, () =>
+    'Review the latest draft against the original user request and any tool evidence. ' +
+    'Return only JSON with a boolean approved and a string feedback. Explain what to fix if not approved.',
+  (text, state) => {
+    const draft = state.finalAnswer;
+    const verdict = parseJson(text) as { approved?: unknown; feedback?: unknown } | null;
+    if (typeof verdict?.approved !== 'boolean' || typeof verdict.feedback !== 'string'
+      || (!verdict.approved && !verdict.feedback.trim())) {
+      return {
+        update: { finalAnswer: draft },
+        error: { code: 'INVALID_REFLECTION_REVIEW', message: 'Model did not produce a valid review' },
+      };
+    }
+    if (verdict.approved) {
+      return { update: { finalAnswer: draft }, output: verdict };
+    }
+    if (state.reflectionRevisions >= maxRevisions) {
+      return {
+        update: { finalAnswer: draft },
+        output: verdict,
+        error: { code: 'REFLECTION_LIMIT', message: 'Draft still needs revision after reaching the revision limit' },
+      };
+    }
+    return {
+      update: {
+        finalAnswer: undefined,
+        previousDraft: draft,
+        reflectionRevisions: state.reflectionRevisions + 1,
+        messages: [...state.messages, {
+          role: 'user',
+          content: 'Revise the previous draft for the original request using this review feedback: ' + verdict.feedback,
+        }],
+      },
+      output: verdict,
+    };
+  });
 }
 
 /**
@@ -130,6 +271,7 @@ function buildExecutionStep(
     ...(execution.source ? { source: execution.source } : {}),
     input: toolCall.args,
     output: execution.output,
+    ...(execution.childRunId ? { childRunId: execution.childRunId } : {}),
     error: execution.error,
     toolCallId: toolCall.id,
     timestamp: new Date().toISOString(),
@@ -179,32 +321,15 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
   return async (state: AgentStateType): Promise<AgentStateUpdate> => {
     const currentIteration = state.iteration + 1;
 
-    // 迭代轮次刹车：超过 maxIterations 立即熔断
-    if (currentIteration > state.maxIterations) {
-      const output = `Agent reached the maximum of ${state.maxIterations} iterations`;
-      const finalStep = buildMaxIterationStep(state.maxIterations, output);
-      if (deps?.recordStep) {
-        await deps.recordStep(finalStep);
-      }
-      return {
-        iteration: currentIteration,
-        finalAnswer: output,
-        isMaxIterationError: true,
-        steps: [finalStep],
-      };
-    }
-
     if (!deps?.planner) {
-      return {
-        iteration: currentIteration,
-        finalAnswer: '',
-      };
+      return { iteration: currentIteration, finalAnswer: '' };
+    }
+    const halted = await startModelCall(state, deps, 'plan');
+    if (halted) {
+      return halted;
     }
 
-    // 执行 LangChain 规划
-    const planResult = await deps.planner.plan(state.messages, state.tools, {
-      model: deps.agentModel,
-    });
+    const planResult = await deps.planner.plan(state.messages, state.tools, { model: deps.agentModel });
 
     // 每轮模型调用只在规划步骤上记录一次，即使该轮请求多个工具。
     const usage = isTokenUsage(planResult.usage) ? planResult.usage : null;
@@ -240,16 +365,22 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
       await deps.recordStep(planStep);
     }
 
+    const executingTask = deps.mode === 'plan-and-execute';
     const nextMessages = [...state.messages];
-    if (planResult.response) {
-      nextMessages.push(planResult.response);
+    if (planResult.response || executingTask || deps.mode === 'reflection') {
+      nextMessages.push(planResult.response ?? { role: 'assistant', content: finalOutput });
+    }
+
+    if (executingTask && state.taskIndex + 1 < state.taskPlan.length) {
+      nextMessages.push(taskInstruction(state.taskPlan, state.taskIndex + 1));
     }
 
     return {
       iteration: currentIteration,
       messages: nextMessages,
       toolCalls: undefined,
-      finalAnswer: finalOutput,
+      finalAnswer: executingTask ? undefined : finalOutput,
+      ...(executingTask ? { taskIndex: state.taskIndex + 1 } : {}),
       steps: [planStep],
     };
   };
@@ -259,37 +390,33 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
  * 构造 execute 节点处理函数
  *
  * 【核心逻辑】
- * 1. 从当前状态提取首个待执行工具调用 `toolCalls[0]`；
+ * 1. 按模型返回的顺序串行执行待处理工具调用；
  * 2. 调度 `ExecutorService.execute` 执行具体业务 Skill 或通用 Tool；
  * 3. 记录带有 `node: 'execute'` 观测标识的执行步骤；
- * 4. 保存 `executionResult` 供后续 observe 节点提取。
+ * 4. 保存 `executionResults` 供后续 observe 节点提取。
  *
  * @param deps 外部注入的依赖服务与回调
  * @returns 节点处理异步函数
  */
 export function createExecuteNode(deps?: Partial<AgentGraphDeps>) {
   return async (state: AgentStateType): Promise<AgentStateUpdate> => {
-    const toolCall = state.toolCalls?.[0];
-    if (!toolCall || !deps?.executor) {
-      return {};
+    const results: ExecutionResult[] = [];
+    const steps: GraphStep[] = [];
+    for (const call of state.toolCalls ?? []) {
+      if (!deps?.executor) {
+        break;
+      }
+      const execution = deps.executeCall ? await deps.executeCall(call) : await deps.executor.execute(
+        call.name,
+        call.args,
+        { runId: deps.runId ?? '', agent: deps.agentName ?? '' },
+      );
+      const step = buildExecutionStep(state.iteration, call, execution);
+      await deps.recordStep?.(step);
+      results.push(execution);
+      steps.push(step);
     }
-
-    const execution = await deps.executor.execute(
-      toolCall.name,
-      toolCall.args,
-      { runId: deps.runId ?? '', agent: deps.agentName ?? '' },
-    );
-
-    const executionStep = buildExecutionStep(state.iteration, toolCall, execution);
-
-    if (deps.recordStep) {
-      await deps.recordStep(executionStep);
-    }
-
-    return {
-      executionResult: execution,
-      steps: [executionStep],
-    };
+    return { executionResults: results, steps };
   };
 }
 
@@ -300,51 +427,35 @@ export function createExecuteNode(deps?: Partial<AgentGraphDeps>) {
  * 1. 提取执行结果并安全构建 observation 事实数据；
  * 2. 构造规范的 `role: 'tool'` 消息回填至历史上下文；
  * 3. 记录带有 `node: 'observe'` 观测标识的观察步骤；
- * 4. 重置 `toolCalls` 与 `executionResult`，准备进入下一轮 plan。
+ * 4. 重置 `toolCalls` 与 `executionResults`，准备进入下一轮 plan。
  *
  * @param deps 外部注入的依赖服务与回调
  * @returns 节点处理异步函数
  */
 export function createObserveNode(deps?: Partial<AgentGraphDeps>) {
   return async (state: AgentStateType): Promise<AgentStateUpdate> => {
-    const toolCall = state.toolCalls?.[0];
-    const execution = state.executionResult;
-    if (!toolCall || !execution) {
-      return {
-        toolCalls: undefined,
-        executionResult: undefined,
+    const messages = [...state.messages];
+    const steps: GraphStep[] = [];
+    for (const [index, execution] of state.executionResults.entries()) {
+      const call = state.toolCalls![index];
+      const observation = execution.error
+        ? { error: execution.error, childRunId: execution.childRunId }
+        : { output: execution.output };
+      const toolCallId = call.id ?? `call-${state.iteration}-${index}`;
+      const message: LlmToolMessage = {
+        role: 'tool',
+        tool_call_id: toolCallId,
+        content: serializeObservation(observation),
       };
-    }
+      messages.push(message);
 
-    const observation = execution.error
-      ? { error: execution.error }
-      : { output: execution.output };
-    const toolCallId = toolCall.id ?? `call-${state.iteration}`;
-
-    // OpenAI 规范回填 tool 消息
-    const toolMessage: LlmToolMessage = {
-      role: 'tool',
-      tool_call_id: toolCallId,
-      content: serializeObservation(observation),
-    };
-
-    const nextMessages = [...state.messages, toolMessage];
-    const newSteps: GraphStep[] = [];
-
-    if (execution.type !== 'observe') {
-      const observeStep = buildObserveStep(state.iteration, execution.name, observation, toolCallId);
-      if (deps?.recordStep) {
-        await deps.recordStep(observeStep);
+      if (execution.type !== 'observe') {
+        const step = buildObserveStep(state.iteration, execution.name, observation, toolCallId);
+        await deps?.recordStep?.(step);
+        steps.push(step);
       }
-      newSteps.push(observeStep);
     }
-
-    return {
-      messages: nextMessages,
-      toolCalls: undefined,
-      executionResult: undefined,
-      steps: newSteps,
-    };
+    return { messages, toolCalls: undefined, executionResults: [], steps };
   };
 }
 
@@ -379,17 +490,43 @@ export function routeAfterPlan(state: AgentStateType): string {
  * @returns 编译好的 CompiledStateGraph
  */
 export function createAgentGraph(deps?: Partial<AgentGraphDeps>) {
-  return new StateGraph(AgentStateAnnotation)
+  const graph = new StateGraph(AgentStateAnnotation)
     .addNode('plan', createPlanNode(deps))
     .addNode('execute', createExecuteNode(deps))
     .addNode('observe', createObserveNode(deps))
-    .addEdge(START, 'plan')
-    .addConditionalEdges('plan', routeAfterPlan, {
-      execute: 'execute',
-      [END]: END,
-    })
     .addEdge('execute', 'observe')
-    .addEdge('observe', 'plan')
+    .addEdge('observe', 'plan');
+
+  if (deps?.mode === 'plan-and-execute') {
+    return graph
+      .addNode('make-plan', createTaskPlanningNode(deps))
+      .addNode('synthesize', createSynthesisNode(deps))
+      .addEdge(START, 'make-plan')
+      .addConditionalEdges('make-plan', state => state.finalAnswer !== undefined ? END : 'plan', [END, 'plan'])
+      .addConditionalEdges('plan', state => {
+        if (state.finalAnswer !== undefined) return END;
+        if (state.toolCalls?.length) return 'execute';
+        return state.taskIndex < state.taskPlan.length ? 'plan' : 'synthesize';
+      }, [END, 'execute', 'plan', 'synthesize'])
+      .addEdge('synthesize', END)
+      .compile();
+  }
+
+  if (deps?.mode === 'reflection') {
+    return graph
+      .addNode('review', createReviewNode(deps))
+      .addEdge(START, 'plan')
+      .addConditionalEdges('plan', state => {
+        if (state.isMaxIterationError) return END;
+        return state.finalAnswer !== undefined ? 'review' : 'execute';
+      }, [END, 'review', 'execute'])
+      .addConditionalEdges('review', state => state.finalAnswer !== undefined ? END : 'plan', [END, 'plan'])
+      .compile();
+  }
+
+  return graph
+    .addEdge(START, 'plan')
+    .addConditionalEdges('plan', routeAfterPlan, { execute: 'execute', [END]: END })
     .compile();
 }
 

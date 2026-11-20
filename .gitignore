@@ -7,4 +7,6 @@ dist/
 .env
 .env.*
 
-sdd/
+/sdd/*
+/sdd/agent-operations/*
+!/sdd/agent-operations/eval-suite.example.json

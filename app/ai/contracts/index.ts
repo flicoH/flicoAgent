@@ -49,6 +49,8 @@ export interface ExecutionResult {
   name: string;
   /** 能力来源分类（如 'builtin' | 'mcp'） */
   source?: 'builtin' | 'mcp';
+  /** 已创建的委派运行 ID。 */
+  childRunId?: string;
   /** 成功执行后的输出结果 */
   output?: unknown;
   /** 结构化错误信息（不向循环外抛出异常，而是让下一轮模型感知并自愈） */
@@ -93,6 +95,8 @@ export interface Step {
   name?: string;
   /** 工具来源分类（仅在 tool 步骤中存在，'builtin' | 'mcp'） */
   source?: 'builtin' | 'mcp';
+  /** 已创建的委派运行 ID。 */
+  childRunId?: string;
   /** 输入数据 */
   input?: unknown;
   /** 输出数据 */
@@ -125,10 +129,18 @@ export interface RunResult {
   threadId: string;
 }
 
-/**
- * 持久化存储的完整运行链路实体 (TraceRun)
- */
+/** 由业务鉴权层提供的运行访问范围。 */
+export interface AgentRunAccess {
+  scope?: string;
+  agents?: readonly string[];
+}
+
+/** 持久化存储的完整运行链路。 */
 export interface TraceRun extends RunResult {
+  scope?: string;
+  parentRunId?: string;
+  rootRunId?: string;
+  delegationDepth?: number;
   /** 执行本次运行的 Agent 名称 */
   agent: string;
   /** 调用方传入的初始入参 */

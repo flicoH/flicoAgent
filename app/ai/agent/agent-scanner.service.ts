@@ -1,7 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, resolve } from 'node:path';
-import { AgentDefinition } from './agent.interface';
+import { AgentDefinition, isAgentLoopMode } from './agent.interface';
 
 // 用于动态加载业务 demo 编译后的 Agent 及 Prompt CommonJS 模块
 const runtimeRequire = createRequire(__filename);
@@ -42,9 +42,15 @@ function isAgentDefinition(value: unknown): value is AgentDefinition {
     && agent.skills.every(item => typeof item === 'string')
     && Array.isArray(agent.tools)
     && agent.tools.every(item => typeof item === 'string')
+    && (agent.delegates === undefined || (Array.isArray(agent.delegates)
+      && agent.delegates.every(item => typeof item === 'string' && Boolean(item.trim()))))
+    && (agent.delegationOnly === undefined || typeof agent.delegationOnly === 'boolean')
     && (agent.prompt === undefined || typeof agent.prompt === 'string')
     && (agent.promptFile === undefined || typeof agent.promptFile === 'string')
-    && (agent.model === undefined || typeof agent.model === 'string');
+    && (agent.model === undefined || typeof agent.model === 'string')
+    && (agent.mode === undefined || isAgentLoopMode(agent.mode))
+    && (agent.maxReflectionRevisions === undefined
+      || (Number.isSafeInteger(agent.maxReflectionRevisions) && agent.maxReflectionRevisions >= 0));
 }
 
 /**
@@ -90,6 +96,14 @@ export class AgentScannerService implements OnModuleInit {
 
       // Prompt 模块解析完成后写入注册表，确保外部读取到的都是可以直接使用的完整定义
       this.agents.set(resolved.name, resolved);
+    }
+
+    for (const agent of this.agents.values()) {
+      for (const target of new Set(agent.delegates)) {
+        if (!this.agents.has(target)) {
+          throw new Error(`Invalid sub-agent "${target}" declared by "${agent.name}"`);
+        }
+      }
     }
 
     // 控制台输出启动日志，便于开发者核对已被框架识别的 Agent 列表

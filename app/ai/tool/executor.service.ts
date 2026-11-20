@@ -37,10 +37,17 @@ export class ExecutorService {
     name: string,
     input: unknown,
     context: Record<string, unknown>,
+    permissions?: { skills: string[]; tools: string[] },
+    delegated = false,
   ): Promise<ExecutionResult> {
-    // 1. 优先匹配业务 Skill
-    const skill = this.skills.get(name);
+    const skillAllowed = !permissions || permissions.skills.includes(name);
+    const toolAllowed = !permissions || permissions.tools.includes(name);
+    // 同名能力保留 Skill 优先级，并分别校验两类白名单。
+    const skill = skillAllowed ? this.skills.get(name) : undefined;
     if (skill) {
+      if (delegated && skill.approval === 'required') {
+        return this.delegatedApprovalError(name);
+      }
       try {
         return {
           type: 'skill',
@@ -53,8 +60,11 @@ export class ExecutorService {
     }
 
     // 2. 次选匹配通用 Tool
-    const tool = this.tools.get(name);
+    const tool = toolAllowed ? this.tools.get(name) : undefined;
     if (tool) {
+      if (delegated && tool.approval === 'required') {
+        return this.delegatedApprovalError(name);
+      }
       try {
         return {
           type: 'tool',
@@ -72,9 +82,19 @@ export class ExecutorService {
       type: 'observe',
       name,
       error: {
-        code: 'CAPABILITY_NOT_FOUND',
-        message: `Skill or tool "${name}" is not registered`,
+        code: skillAllowed || toolAllowed ? 'CAPABILITY_NOT_FOUND' : 'CAPABILITY_NOT_ALLOWED',
+        message: skillAllowed || toolAllowed
+          ? `Skill or tool "${name}" is not registered`
+          : `Skill or tool "${name}" is unavailable to this Agent`,
       },
+    };
+  }
+
+  private delegatedApprovalError(name: string): ExecutionResult {
+    return {
+      type: 'observe',
+      name,
+      error: { code: 'DELEGATE_APPROVAL_REQUIRED', message: 'Delegated runs cannot request approval' },
     };
   }
 

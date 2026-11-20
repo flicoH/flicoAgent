@@ -16,6 +16,9 @@ export interface ToolDefinition {
    */
   name: string;
 
+  /** 此能力需要人工批准。 */
+  approval?: 'required';
+
   /**
    * 工具的能力描述
    * 面向大模型与调用方，清晰说明工具的用途及行为

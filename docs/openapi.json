@@ -419,6 +419,13 @@
     "/api/ai/agent/graph": {
       "get": {
         "summary": "读取执行图拓扑",
+        "parameters": [
+          {
+            "name": "mode",
+            "in": "query",
+            "schema": {"type": "string", "enum": ["react", "plan-and-execute", "reflection"], "default": "react"}
+          }
+        ],
         "responses": {
           "200": {
             "description": "成功。",
@@ -714,6 +721,7 @@
               "input": {},
               "parentRunId": {"type": "string"},
               "rootRunId": {"type": "string"},
+              "delegationDepth": {"type": "integer", "minimum": 1},
               "createdAt": {"type": "string", "format": "date-time"},
               "updatedAt": {"type": "string", "format": "date-time"}
             },
@@ -737,7 +745,7 @@
           "modelDurationMs": {"type": "integer", "minimum": 0},
           "toolCallId": {"type": "string"},
           "timestamp": {"type": "string", "format": "date-time"},
-          "node": {"enum": ["plan", "execute", "observe"]},
+          "node": {"enum": ["plan", "execute", "observe", "make-plan", "synthesize", "review"]},
           "planner": {"const": "langchain"}
         },
         "required": ["type", "iteration", "timestamp"]
@@ -785,6 +793,9 @@
           "prompt": {"type": "string"},
           "promptFile": {"type": "string"},
           "delegates": {"type": "array", "items": {"type": "string"}},
+          "delegationOnly": {"type": "boolean"},
+          "mode": {"type": "string", "enum": ["react", "plan-and-execute", "reflection"], "default": "react"},
+          "maxReflectionRevisions": {"type": "integer", "minimum": 0, "default": 1},
           "model": {"type": "string"}
         },
         "required": ["name", "skills", "tools"]

@@ -228,6 +228,36 @@ Agent 同步结果、SSE 的 `done` 和 Trace 记录均可返回 `usage`，包�
 
 用 `GET /api/ai/trace/{runId}/usage` 查询单次运行的消耗，返回 `{ success: true, data: { runId, usage } }`。合计只包含模型实际报告的用量。没有已上报数据时，查询接口返回 `usage: null`，包括加入统计之前的运行。
 
+### Agent 循环模式
+
+在业务工程的 `app/agents/*.agent.ts` 中通过 `AgentDefinition.mode` 选择运行模式。省略 `mode` 时默认使用 `react`。
+
+```ts
+import type { AgentDefinition } from '@flicoh/agent';
+
+export default {
+  name: 'report-reviewer',
+  mode: 'reflection',
+  maxReflectionRevisions: 1,
+  skills: [],
+  tools: [],
+} satisfies AgentDefinition;
+```
+
+| `mode` | 执行流程 |
+| --- | --- |
+| `react` | 逐轮选择工具、观察结果，直到模型给出最终答案 |
+| `plan-and-execute` | 生成有序的 JSON 步骤列表。依次执行每一步，最后汇总步骤结果 |
+| `reflection` | 先生成草稿，再审阅。需要修改时按反馈修订，然后重新审阅 |
+
+`maxReflectionRevisions` 默认是 `1`，设为 `0` 时只审阅一次。若审阅未通过且已达到修订上限，返回最后一份草稿，审阅步骤记录 `REFLECTION_LIMIT`。Plan-and-Execute 在本次运行中按初次生成的步骤执行。独立的规划、审阅和汇总阶段没有工具执行权限。
+
+所有模型阶段均计入 `ai.runtime.maxIterations`，有委派时还计入运行树共享模型预算。Reflection 若要完成一次修订并再次审阅，至少需要四次模型调用，工具调用可能增加所需轮次。子 Agent 使用自己的 `mode`。同步和 SSE 接口仍按 Agent 名称发起运行，可以使用 `GET /api/ai/agent/graph?mode=reflection` 查看指定模式的拓扑。
+
+### 多 Agent 委派
+
+在 Agent 声明中设置 `delegates` 后，可以通过保留工具 `agent-delegate` 调用列出的子 Agent。父执行步骤提供 `childRunId`，子 Trace 提供 `parentRunId`、`rootRunId` 和 `delegationDepth`。配置及离线测试步骤见 [Agent 委派接入示例](docs/agent-delegation.md)。
+
 ## 故障排查
 
 - **提示缺少模型 API Key**：确认当前环境配置文件存在、环境名正确，并且 `apiKey` 已读取到有效环境变量。

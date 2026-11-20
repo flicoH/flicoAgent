@@ -26,6 +26,9 @@ export interface SkillDefinition {
    */
   name: string;
 
+  /** 此能力需要人工批准。 */
+  approval?: 'required';
+
   /**
    * 技能的简明描述
    * 面向模型规划器与调用方，清晰说明此技能的作用、触发时机与预期结果

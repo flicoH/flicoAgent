@@ -24,7 +24,7 @@
 
 在业务工程的 Skill 或 Tool 定义中设置 `approval: 'required'`。内置 `service-invoke` 可用 `ai.tools.serviceInvokeApproval: true` 启用审批；MCP 通过每个 server 的 `approvalTools: ['tool-name']` 配置。审批 ID 只对应记录里的一个待批调用；重复决定返回 409。拒绝会给模型一个失败观察并继续执行。外部写操作可以使用 Skill/Tool 上下文中的 `idempotencyKey` 保证下游幂等。
 
-Agent 声明 `delegates: ['research-agent']` 后，模型可调用 `agent-delegate`，参数为 `{ agent, input }`。目标还必须在调用者的 Agent 白名单内（如有配置）。每个根运行最多发起四个子运行，最多两层委派，共享模型调用预算为 `ai.runtime.maxIterations + 10`。子 Agent 不获得父会话历史，且不会在子运行里执行审批工具。用父步骤的 `childRunId` 和子详情的 `parentRunId` / `rootRunId` 回看调用链。
+委派配置、预算规则及离线验证见 [Agent 委派接入示例](agent-delegation.md)。
 
 文件存储和后台队列供单写进程部署。后台最多同时处理四个任务，已排队和执行中的后台任务合计达到 100 时，提交或审批会返回 429，可稍后重试。重启后可以继续待审批的运行；排队或执行中的运行在下次查询时标记为中断。取消会传给支持 `AbortSignal` 的模型和能力，不能撤销已发生的外部操作。自定义 TraceStore 需实现 `list` 才能支持运行列表；自定义 VectorStore 需实现 `documents`、`removeDocument`、`loadChunk`，并在 `query` 中兑现 root 过滤，才能使用新增管理接口。
 

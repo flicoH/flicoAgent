@@ -31,9 +31,15 @@ export class TraceService {
    * @param threadId 可选会话线程 ID
    * @returns 初始化的 TraceRun 对象
    */
-  async createRun(agent: string, input: unknown, threadId?: string): Promise<TraceRun> {
+  async createRun(
+    agent: string,
+    input: unknown,
+    threadId?: string,
+    lineage?: Pick<TraceRun, 'parentRunId' | 'rootRunId' | 'delegationDepth' | 'scope'>,
+  ): Promise<TraceRun> {
     const now = new Date().toISOString();
     const run: TraceRun = {
+      ...lineage,
       runId: randomUUID(),
       agent,
       input,

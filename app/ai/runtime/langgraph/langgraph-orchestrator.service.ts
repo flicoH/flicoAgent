@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
 import { ConfigService } from '../../../config/config.service';
+import type { AgentDefinition, AgentLoopMode } from '../../agent/agent.interface';
 import { AgentScannerService } from '../../agent/agent-scanner.service';
 import { GuardrailService } from '../../guardrail/guardrail.service';
 import { LlmMessage } from '../../contracts';
@@ -7,7 +9,10 @@ import { CheckpointService } from '../../memory/checkpoint.service';
 import { ThreadService } from '../../memory/thread.service';
 import { ExecutorService } from '../../tool/executor.service';
 import {
+  AgentRunAccess,
+  ExecutionResult,
   RunResult,
+  TraceRun,
   RuntimeEvent,
   Step,
 } from '../../contracts';
@@ -18,9 +23,20 @@ import { summarizeTokenUsage } from '../../trace/token-usage';
 import { TraceService } from '../../trace/trace.service';
 import { resolveMaxIterations } from '../internal/load-runtime-config';
 import { LangChainPlannerService } from '../langchain/langchain-planner.service';
-import { SkillToolAdapter } from '../langchain/skill-tool.adapter';
+import { AdaptedStructuredTool, SkillToolAdapter } from '../langchain/skill-tool.adapter';
 import { createAgentGraph, defaultAgentGraph } from './agent.graph';
 import type { GraphStep } from './agent.state';
+
+const DELEGATE_TOOL = 'agent-delegate';
+const SCOPED_CHECKPOINT_PREFIX = 'agent-scope-';
+const SCOPED_CHECKPOINT_ID = /^agent-scope-[a-f0-9]{64}$/i;
+
+interface DelegationBudget {
+  remainingModelCalls: number;
+  maxDepth: number;
+  remainingChildRuns: number;
+  allowedAgents?: readonly string[];
+}
 
 /**
  * 观察结果安全序列化辅助函数
@@ -89,6 +105,7 @@ export class LangGraphOrchestratorService {
    * @param input 初始输入数据（文本提问或结构化参数）
    * @param emitOrThreadId 可选的实时事件推送回调或 threadId
    * @param rawThreadId 可选的所属会话线程 ID
+   * @param access 业务鉴权层提供的运行访问范围
    * @returns 保证锁死合同结构 { runId, output, steps, threadId }
    */
   async run(
@@ -96,6 +113,7 @@ export class LangGraphOrchestratorService {
     input: unknown,
     emitOrThreadId?: ((event: RuntimeEvent) => void | Promise<void>) | string,
     rawThreadId?: string,
+    access?: AgentRunAccess,
   ): Promise<RunResult> {
     const { emit, requestedThreadId } = this.resolveRunParams(emitOrThreadId, rawThreadId);
 
@@ -104,33 +122,72 @@ export class LangGraphOrchestratorService {
       throw new Error(`Agent "${agentName}" is not registered`);
     }
 
-    // Thread 会话管理与线程标识确认
-    const threadEnabled = this.threadService.isThreadEnabled();
-    const threadId = this.threadService.ensureThread(requestedThreadId);
+    if (agent.delegationOnly || (access?.agents && !access.agents.includes(agentName))) {
+      throw new ForbiddenException(`Agent "${agentName}" cannot be run directly by this caller`);
+    }
 
-    // Guardrail 安全拦截校验（循环最前）
-    const guardrailRejection = await this.handleGuardrail(agentName, input, threadId, emit);
+    const threadId = this.threadService.ensureThread(requestedThreadId);
+    if (access?.scope === undefined && this.threadService.isThreadEnabled()) {
+      const normalizedThreadId = decodeURIComponent(threadId).replace(/^\{|\}$/g, '').trim();
+      if (SCOPED_CHECKPOINT_ID.test(normalizedThreadId)) {
+        throw new BadRequestException('Invalid threadId');
+      }
+    }
+    const run = await this.trace.createRun(agentName, input, threadId, { scope: access?.scope });
+    const budget = agent.delegates?.length ? {
+      remainingModelCalls: this.delegationLimit('maxModelCalls', resolveMaxIterations(this.config) + 10, 1),
+      maxDepth: this.delegationLimit('maxDepth', 2, 0),
+      remainingChildRuns: this.delegationLimit('maxChildRuns', 4, 0),
+      allowedAgents: access?.agents?.slice(),
+    } : undefined;
+    return this.executeRun(agent, run, budget, [agentName], emit);
+  }
+
+  private async executeRun(
+    agent: AgentDefinition,
+    run: TraceRun,
+    budget: DelegationBudget | undefined,
+    ancestry: string[],
+    emit?: (event: RuntimeEvent) => void | Promise<void>,
+  ): Promise<RunResult> {
+    const { input, threadId } = run;
+    const agentName = agent.name;
+    const threadEnabled = !run.parentRunId && this.threadService.isThreadEnabled();
+    const guardrailRejection = await this.handleGuardrail(run, emit);
     if (guardrailRejection) {
       return guardrailRejection;
     }
 
-    // 1. 历史检查点加载
-    const { checkpoint, contextMessages } = await this.loadHistoricalContext(threadEnabled, threadId);
-
-    // 2. 初始化对话消息历史
+    const checkpointId = run.scope === undefined
+      ? threadId
+      : SCOPED_CHECKPOINT_PREFIX + createHash('sha256').update(JSON.stringify([run.scope, threadId])).digest('hex');
+    const { checkpoint, contextMessages } = await this.loadHistoricalContext(threadEnabled, checkpointId);
     const userInputText = this.normalizeInputText(input);
     const messages = this.buildInitialMessages(agent.prompt, contextMessages, userInputText);
-
-    // 3. 创建初始 Trace 记录
-    const run = await this.trace.createRun(agentName, input, threadId);
     const steps: Step[] = [];
 
     // 4. 将 Agent 白名单内的 Skill 与 Tool（含 MCP）适配为 LangChain StructuredTool
     const structuredTools = this.adapter.adaptForAgent(
-      agent.skills,
-      agent.tools,
+      agent.skills.filter(name => name !== DELEGATE_TOOL),
+      agent.tools.filter(name => name !== DELEGATE_TOOL),
       { runId: run.runId, agent: agentName },
     );
+
+    const targets = [...new Set(agent.delegates)].filter(name => !ancestry.includes(name)
+      && (!budget?.allowedAgents || budget.allowedAgents.includes(name)));
+    if (budget && budget.remainingChildRuns > 0 && targets.length && ancestry.length <= budget.maxDepth) {
+      structuredTools.push(new AdaptedStructuredTool(
+        DELEGATE_TOOL,
+        'Delegate a text task to a declared sub-agent and wait for its result.',
+        {
+          type: 'object',
+          properties: { agent: { type: 'string', enum: targets }, input: { type: 'string' } },
+          required: ['agent', 'input'],
+          additionalProperties: false,
+        },
+        args => this.delegate(agent, run, budget, ancestry, args),
+      ));
+    }
 
     // 5. 解析动态循环迭代上限（禁止写死 5）
     const maxIterations = resolveMaxIterations(this.config);
@@ -142,6 +199,20 @@ export class LangGraphOrchestratorService {
       runId: run.runId,
       agentName,
       agentModel: agent.model,
+      mode: agent.mode,
+      maxReflectionRevisions: agent.maxReflectionRevisions,
+      takeModelCall: budget ? () => {
+        if (budget.remainingModelCalls <= 0) {
+          return false;
+        }
+        budget.remainingModelCalls--;
+        return true;
+      } : undefined,
+      executeCall: call => call.name === DELEGATE_TOOL
+        ? this.delegate(agent, run, budget, ancestry, call.args)
+        : this.executor.execute(call.name, call.args, {
+          runId: run.runId, agent: agentName, parentRunId: run.parentRunId, scope: run.scope,
+        }, agent, Boolean(run.parentRunId)),
       recordStep: async (step: GraphStep) => {
         await this.recordStep(run.runId, steps, step, emit);
       },
@@ -164,8 +235,7 @@ export class LangGraphOrchestratorService {
 
     const finalOutput = finalState.finalAnswer ?? '';
 
-    // 若非超时熔断，补充记录最终确认步
-    if (!finalState.isMaxIterationError) {
+    if (steps.at(-1)?.type !== 'final') {
       await this.recordFinalStep(run.runId, steps, finalState.iteration, finalOutput, emit);
     }
 
@@ -173,9 +243,85 @@ export class LangGraphOrchestratorService {
     await this.emitOutput(finalOutput, emit);
 
     // 8. 会话检查点保存（若开启）
-    await this.persistCheckpoint(threadEnabled, checkpoint, threadId, userInputText, finalOutput);
+    await this.persistCheckpoint(threadEnabled, checkpoint, checkpointId, userInputText, finalOutput);
 
     return { runId: run.runId, output: finalOutput, steps, threadId, usage: summarizeTokenUsage(steps) };
+  }
+
+  private delegationLimit(key: string, fallback: number, minimum: number): number {
+    const value = this.config.get<number>(`ai.runtime.delegation.${key}`);
+    return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum ? value : fallback;
+  }
+
+  private async delegate(
+    parent: AgentDefinition,
+    run: TraceRun,
+    budget: DelegationBudget | undefined,
+    ancestry: string[],
+    args: unknown,
+  ): Promise<ExecutionResult> {
+    const failure = (code: string, message: string, childRunId?: string): ExecutionResult => ({
+      type: 'tool',
+      name: DELEGATE_TOOL,
+      ...(childRunId ? { childRunId } : {}),
+      error: { code, message },
+    });
+    const request = args as { agent?: unknown; input?: unknown } | null;
+    if (typeof request?.agent !== 'string' || typeof request.input !== 'string' || !request.input.trim()) {
+      return failure('DELEGATE_INVALID_INPUT', 'Delegation requires an agent name and non-empty text input');
+    }
+    const child = this.agents.get(request.agent);
+    if (!budget || !child || !parent.delegates?.includes(child.name)
+      || (budget.allowedAgents && !budget.allowedAgents.includes(child.name))) {
+      return failure('DELEGATE_NOT_ALLOWED', 'The requested sub-agent is unavailable to this Agent');
+    }
+    if (ancestry.includes(child.name)) {
+      return failure('DELEGATE_CYCLE', 'Delegation would revisit an ancestor');
+    }
+    if (ancestry.length > budget.maxDepth) {
+      return failure('DELEGATE_DEPTH_EXCEEDED', 'Delegation depth limit reached');
+    }
+    if (budget.remainingModelCalls <= 0) {
+      return failure('DELEGATE_BUDGET_EXCEEDED', 'Agent tree reached its model call budget');
+    }
+
+    if (budget.remainingChildRuns <= 0) {
+      return failure('DELEGATE_BUDGET_EXCEEDED', 'Agent tree reached its child run budget');
+    }
+    budget.remainingChildRuns--;
+
+    const childRun = await this.trace.createRun(child.name, request.input, this.threadService.createThread(), {
+      scope: run.scope,
+      parentRunId: run.runId,
+      rootRunId: run.rootRunId ?? run.runId,
+      delegationDepth: ancestry.length,
+    });
+    try {
+      const result = await this.executeRun(child, childRun, budget, [...ancestry, child.name]);
+      const lastStep = result.steps.at(-1);
+      if (lastStep?.error || lastStep?.type === 'guardrail') {
+        return failure(
+          lastStep.error?.code ?? 'DELEGATE_GUARDRAIL',
+          lastStep.error?.message ?? result.output,
+          childRun.runId,
+        );
+      }
+      return {
+        type: 'tool',
+        name: DELEGATE_TOOL,
+        childRunId: childRun.runId,
+        output: { agent: child.name, runId: childRun.runId, output: result.output },
+      };
+    } catch {
+      await this.trace.addStep(childRun.runId, {
+        type: 'final',
+        iteration: 1,
+        output: 'Sub-agent execution failed',
+        error: { code: 'DELEGATE_FAILED', message: 'Sub-agent execution failed' },
+        timestamp: new Date().toISOString(),
+      });
+      return failure('DELEGATE_FAILED', 'Sub-agent execution failed', childRun.runId);
+    }
   }
 
   /**
@@ -184,12 +330,14 @@ export class LangGraphOrchestratorService {
    * @param agentName 目标 Agent 的注册名称
    * @param input 初始输入数据
    * @param threadId 可选会话线程 ID
+   * @param access 业务鉴权层提供的运行访问范围
    * @returns 运行时事件流迭代器 (delta, step)
    */
   async *runStream(
     agentName: string,
     input: unknown,
     threadId?: string,
+    access?: AgentRunAccess,
   ): AsyncIterable<RuntimeEvent> {
     const queue: RuntimeEvent[] = [];
     let resolveNext: (() => void) | null = null;
@@ -204,7 +352,7 @@ export class LangGraphOrchestratorService {
       }
     };
 
-    const task = this.run(agentName, input, emit, threadId)
+    const task = this.run(agentName, input, emit, threadId, access)
       .then(() => {
         finished = true;
         if (resolveNext) {
@@ -244,11 +392,11 @@ export class LangGraphOrchestratorService {
    *
    * @returns 拓扑结构 { nodes, edges }
    */
-  getGraph(): {
+  getGraph(mode: AgentLoopMode = 'react'): {
     nodes: Array<{ id: string; name: string }>;
     edges: Array<{ source: string; target: string; conditional: boolean }>;
   } {
-    const drawable = defaultAgentGraph.getGraph();
+    const drawable = (mode === 'react' ? defaultAgentGraph : createAgentGraph({ mode })).getGraph();
     const nodes = Object.keys(drawable.nodes).map((id) => ({
       id,
       name: drawable.nodes[id]?.name || id,
@@ -294,18 +442,15 @@ export class LangGraphOrchestratorService {
    * 安全护栏拦截处理（位于循环最前端）
    * 若触发违规拦截，记录 guardrail 步骤并闭环返回
    *
-   * @param agentName Agent 名称
-   * @param input 输入参数
-   * @param threadId 会话线程 ID
+   * @param run 当前运行记录
    * @param emit 实时事件推送回调
    * @returns 拦截时返回 RunResult，未拦截时返回 null
    */
   private async handleGuardrail(
-    agentName: string,
-    input: unknown,
-    threadId: string,
+    run: TraceRun,
     emit?: (event: RuntimeEvent) => void | Promise<void>,
   ): Promise<RunResult | null> {
+    const { input, threadId } = run;
     const checkText = typeof input === 'string'
       ? input
       : (typeof input === 'object' && input !== null ? JSON.stringify(input) : String(input ?? ''));
@@ -315,7 +460,6 @@ export class LangGraphOrchestratorService {
       return null;
     }
 
-    const run = await this.trace.createRun(agentName, input, threadId);
     const steps: Step[] = [];
     const rejectionOutput = guardrailCheck.reason || '输入内容触发安全规则，已被拦截。';
     const guardStep: Step = {
