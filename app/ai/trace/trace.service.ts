@@ -75,6 +75,7 @@ export class TraceService {
     // 当该步骤为最终完成步骤或安全拦截步骤且包含文本输出时，同步更新顶层 output 字段
     if ((step.type === 'final' || step.type === 'guardrail') && typeof step.output === 'string') {
       run.output = step.output;
+      if (step.citations?.length) run.citations = step.citations;
     }
     run.updatedAt = new Date().toISOString();
     await this.store.save(run);

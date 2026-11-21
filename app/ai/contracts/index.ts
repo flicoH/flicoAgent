@@ -81,10 +81,19 @@ export interface TokenUsage {
   totalTokens: number;
 }
 
+export interface Citation {
+  ref: string;
+  docId: string;
+  chunkId: string;
+  score: number;
+}
+
 /**
  * 运行轨迹中的单个步骤实体 (Step)
  */
 export interface Step {
+  /** 最终回答使用的知识库引用。 */
+  citations?: Citation[];
   /** 模型调用用量。null 表示本轮未上报，缺省表示步骤未记录模型调用。 */
   usage?: TokenUsage | null;
   /** 步骤类型 */
@@ -117,6 +126,8 @@ export interface Step {
  * 【重要】：runId、output、steps、threadId 字段名称在合同中严格锁死，不得变更
  */
 export interface RunResult {
+  /** 本轮检索且最终回答引用的知识库切片。 */
+  citations?: Citation[];
   /** 本次运行已记录的模型用量汇总 */
   usage?: TokenUsage;
   /** 本次运行的唯一 ID */

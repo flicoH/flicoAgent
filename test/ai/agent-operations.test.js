@@ -1,8 +1,10 @@
 const assert = require('node:assert/strict');
+const { execFile } = require('node:child_process');
 const { mkdtemp, mkdir, realpath, rm, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
 const { setTimeout: delay } = require('node:timers/promises');
+const { promisify } = require('node:util');
 const { LangGraphOrchestratorService } = require('../../dist/ai/runtime/langgraph/langgraph-orchestrator.service');
 const { ExecutorService, CapabilityApprovalRequired } = require('../../dist/ai/tool/executor.service');
 const { FileTraceStore } = require('../../dist/ai/store/reference/file-trace.store');
@@ -212,5 +214,39 @@ describe('SDD Agent 运维能力', () => {
     assert.equal(requests[0].threadId, requests[1].threadId);
     assert.notEqual(requests[1].threadId, requests[2].threadId);
     assert.ok(!JSON.stringify(report).includes('hello'));
+  });
+
+  it('评测 CLI 用退出码区分通过、断言失败、无效用例和报告写入失败', async () => {
+    const suite = join(root, 'suite.json');
+    const fetchFixture = join(root, 'fetch.cjs');
+    const cli = join(__dirname, '../../dist/ai/eval/cli.js');
+    const run = (...flags) => promisify(execFile)(process.execPath, [
+      '--require', fetchFixture, cli, '--suite', suite, '--url', 'http://localhost:8080', ...flags,
+    ], { env: { ...process.env, AGENT_EVAL_KEY_ID: 'fixture', AGENT_EVAL_SECRET: 'fixture-key' } });
+    const writeSuite = expectation => writeFile(suite, JSON.stringify({ cases: [
+      { id: 'answer', agent: 'fixture', turns: [{ input: 'test', assert: { outputContains: expectation } }] },
+    ] }));
+
+    await writeFile(fetchFixture, `global.fetch = async () => Response.json({ success: true,
+      data: { runId: 'fixture', output: 'answer', steps: [] },
+    });`);
+    await writeSuite('answer');
+    const success = await run();
+    assert.equal(JSON.parse(success.stdout).passed, 1);
+    await assert.rejects(run('--out', join(root, 'missing', 'report.json')), error => {
+      assert.equal(error.code, 30);
+      assert.match(error.stderr, /Could not write the JSON report/);
+      return true;
+    });
+
+    await writeSuite('expected answer');
+    await assert.rejects(run(), error => {
+      assert.equal(error.code, 10);
+      assert.equal(JSON.parse(error.stdout).failed, 1);
+      return true;
+    });
+
+    await writeFile(suite, 'invalid json');
+    await assert.rejects(run(), { code: 20 });
   });
 });

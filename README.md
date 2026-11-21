@@ -12,6 +12,7 @@ flicoAgent 是一个基于 NestJS 的应用框架内核，提供项目配置、�
 - Vue 3 + Vite 多页面构建及 Nunjucks 页面模板
 - 可配置的 OpenAI 兼容 LLM、Embedding、MCP 工具、RAG、Guardrail、Memory 与 Trace
 - 内置文件型 Trace、Memory 和 Vector 存储实现
+- `flico-agent-eval` 离线回归评测，提供 JSON 报告和 CI 退出码
 
 ## 从 GitHub 克隆并运行
 
@@ -204,6 +205,7 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 | --- | --- |
 | `npm run build` | 编译 Nest/TypeScript 代码至 `dist/` |
 | `npm run build:watch` | 监听模式编译 |
+| `npm run eval -- --help` | 查看离线评测命令（先执行 `npm run build`） |
 | `npm test` | 运行 Mocha 测试（测试脚本使用 `__ENV=local`） |
 | `npm run lint` | 对 JS/Vue 文件执行 ESLint |
 
@@ -257,6 +259,16 @@ export default {
 ### 多 Agent 委派
 
 在 Agent 声明中设置 `delegates` 后，可以通过保留工具 `agent-delegate` 调用列出的子 Agent。父执行步骤提供 `childRunId`，子 Trace 提供 `parentRunId`、`rootRunId` 和 `delegationDepth`。配置及离线测试步骤见 [Agent 委派接入示例](docs/agent-delegation.md)。
+
+### 离线评测
+
+在业务工程安装包含该命令的 `@flicoh/agent` 版本，启动测试服务，并通过环境变量提供 `AGENT_EVAL_KEY_ID` 和 `AGENT_EVAL_SECRET`。
+
+```sh
+npx flico-agent-eval --suite ./eval/cases.json --url http://localhost:8080 --out ./eval-report.json
+```
+
+CLI 按顺序调用 Agent 同步接口，验证工具执行、RAG 引用、权限拦截和多轮记忆。CI 可根据退出码判断结果。服务端配置、用例和报告字段见 [CI 离线评测](docs/agent-operations.md#ci-离线评测)。
 
 ## 故障排查
 

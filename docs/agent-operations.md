@@ -30,10 +30,53 @@
 
 ## CI 离线评测
 
-把用例放在业务工程，使用隔离的服务环境和测试签名凭据。启用 `agentConfig.threadEnabled` 后，多轮用例可以检验真实会话记忆。示例见 [用例集](../sdd/agent-operations/eval-suite.example.json)。
+将 [示例用例集](../sdd/agent-operations/eval-suite.example.json) 复制到业务工程的 `eval/cases.json`，调整 Agent、工具名、知识库文档 ID 和断言。CLI 顺序请求测试服务的 `POST /api/ai/agent/run`。如需在无外部网络的环境运行，在测试服务中配置本地模型和 Embedding。
 
-```sh
-npx flico-agent-eval --suite ./eval/cases.json --url http://localhost:9002 --out ./eval-report.json
+在测试服务配置文件中注册 CI 签名凭据。以下配置允许 `agent-eval` 运行 `support`，对已注册的 `admin` 返回 HTTP 403。启用 `threadEnabled` 后，Agent 可以读取同一用例前几轮的对话。
+
+```js
+module.exports = {
+  agentConfig: { threadEnabled: true },
+  ai: {
+    access: {
+      keys: {
+        'agent-eval': {
+          secret: process.env.AGENT_EVAL_SECRET,
+          scope: 'agent-eval-ci',
+          agents: ['support'],
+        },
+      },
+    },
+  },
+};
 ```
 
-CI 注入 `AGENT_EVAL_KEY_ID` 与 `AGENT_EVAL_SECRET`。运行时每个请求生成新 nonce。退出码：0 全部通过、1 至少一个用例失败、2 参数、用例文件或报告写入失败。用例中的 `toolsUsed` 只认真实执行成功的步骤，`citationDocIds` 检查结构化引用，`expectStatus` 可验证授权返回 403。评测沿用同步 Agent 接口；需要审批的配置会报告该运行未结束。
+通过 CI 的密钥变量提供 `AGENT_EVAL_SECRET`，并将 `AGENT_EVAL_KEY_ID` 设为 `agent-eval`。CLI 为每个请求生成新 nonce。框架的 `serverStart()` 已启用原始请求体读取。直接使用 `NestFactory.create()` 启动时传入 `{ rawBody: true }`，供签名校验使用。
+
+```sh
+npx flico-agent-eval --suite ./eval/cases.json --url http://localhost:8080 --out ./eval-report.json
+```
+
+从源码运行时，先执行 `npm run build`，再使用 `npm run eval --` 传入相同参数。省略 `--out` 时 JSON 写入标准输出。用 `--timeout-ms` 设置单次请求超时，默认 60000 毫秒。
+
+| 用例字段 | 行为 |
+| --- | --- |
+| `cases[].id`、`agent`、`turns` | 唯一用例 ID、Agent 名称、按顺序执行的轮次。每个用例生成独立线程，同一用例的轮次复用该线程。 |
+| `turns[].input` | 发送给 Agent 的 JSON 值。 |
+| `turns[].expectStatus` | 指定 HTTP 状态码，默认为任意 2xx。用 `403` 验证调用者权限。 |
+| `assert.toolsUsed` | 列出的能力必须全部出现在执行成功的 `tool` 或 `skill` 步骤中，按完整名称匹配。 |
+| `assert.citationDocIds` | 列出的文档 ID 必须全部出现在结构化 `citations` 中。知识库需要预先灌入，Agent 的答案需原样复制 `retrieve` 返回的引用标记。 |
+| `assert.outputNotEmpty`、`assert.outputContains` | 用 `true` 检查非空输出，用字符串检查记忆内容。`outputContains` 和 `outputContainsAny` 接收数组时命中任一项即可。 |
+| `assert.guardrailBlocked` | 布尔值，检查是否存在 `guardrail` 步骤。也可使用 `blocked`。 |
+| `assert.stepsContain` | 字符串或数组，检查步骤中是否包含任一指定名称。 |
+
+报告包含总用例数、通过数、失败数、耗时，以及各轮的 HTTP 状态、运行 ID 和断言失败项。报告省略输入、模型输出和签名凭据。某轮失败后会继续执行剩余轮次和用例。待审批响应会计为评测失败。
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 所有用例通过，或成功显示帮助。 |
+| `10` | 至少一个用例失败，包括请求超时、状态不符或断言失败。 |
+| `20` | CLI 参数、签名环境变量或用例文件有误。 |
+| `30` | 无法将 JSON 报告写入指定文件或标准输出。 |
+
+业务代码可以从 `@flicoh/agent/eval` 导入 `parseSuite` 和 `runSuite`，并向 `runSuite` 提供接收 `{ agent, input, threadId }`、返回 `{ status, body }` 的异步请求函数。

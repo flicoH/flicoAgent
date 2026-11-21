@@ -1,5 +1,6 @@
 import type { BuiltinToolFactory } from '../tool.interface';
 import { ConfigService } from '../../../config/config.service';
+import { retrievalOutput } from '../../rag/citations';
 import { resolveRagOptions } from '../../rag/internal/load-rag-config';
 import { RetrieverService } from '../../rag/retriever.service';
 
@@ -57,7 +58,8 @@ const retrieveTool: BuiltinToolFactory = ({ moduleRef }) => {
         throw new Error('RetrieverService is not available in moduleRef');
       }
 
-      return retriever.retrieve(query);
+      const { hits } = await retriever.retrieve(query);
+      return retrievalOutput(hits);
     },
   };
 };

@@ -10,12 +10,15 @@ import { ThreadService } from '../../memory/thread.service';
 import { ExecutorService } from '../../tool/executor.service';
 import {
   AgentRunAccess,
+  Citation,
   ExecutionResult,
   RunResult,
   TraceRun,
   RuntimeEvent,
   Step,
 } from '../../contracts';
+import { collectCitations } from '../../rag/citations';
+import { resolveRagOptions } from '../../rag/internal/load-rag-config';
 import { SkillScannerService } from '../../skill/skill-scanner.service';
 import { ThreadCheckpoint } from '../../store/store.interface';
 import { ToolRegistryService } from '../../tool/tool-registry.service';
@@ -234,9 +237,10 @@ export class LangGraphOrchestratorService {
     );
 
     const finalOutput = finalState.finalAnswer ?? '';
-
+    let citations: Citation[] = [];
     if (steps.at(-1)?.type !== 'final') {
-      await this.recordFinalStep(run.runId, steps, finalState.iteration, finalOutput, emit);
+      citations = collectCitations(finalOutput, steps, resolveRagOptions(this.config).tool.name || 'retrieve');
+      await this.recordFinalStep(run.runId, steps, finalState.iteration, finalOutput, citations, emit);
     }
 
     // 向 SSE 推送文本 delta 流
@@ -245,7 +249,14 @@ export class LangGraphOrchestratorService {
     // 8. 会话检查点保存（若开启）
     await this.persistCheckpoint(threadEnabled, checkpoint, checkpointId, userInputText, finalOutput);
 
-    return { runId: run.runId, output: finalOutput, steps, threadId, usage: summarizeTokenUsage(steps) };
+    return {
+      runId: run.runId,
+      output: finalOutput,
+      steps,
+      threadId,
+      usage: summarizeTokenUsage(steps),
+      ...(citations.length ? { citations } : {}),
+    };
   }
 
   private delegationLimit(key: string, fallback: number, minimum: number): number {
@@ -530,6 +541,7 @@ export class LangGraphOrchestratorService {
    * @param steps 内存步骤数组
    * @param iteration 结束时的轮次
    * @param output 最终产出文本
+   * @param citations 最终回答使用的知识库引用
    * @param emit 实时事件推送回调
    */
   private async recordFinalStep(
@@ -537,6 +549,7 @@ export class LangGraphOrchestratorService {
     steps: Step[],
     iteration: number,
     output: string,
+    citations: Citation[],
     emit?: (event: RuntimeEvent) => void | Promise<void>,
   ): Promise<void> {
     const finalStep: GraphStep = {
@@ -544,6 +557,7 @@ export class LangGraphOrchestratorService {
       node: 'plan',
       iteration,
       output,
+      ...(citations.length ? { citations } : {}),
       timestamp: new Date().toISOString(),
     };
     await this.recordStep(runId, steps, finalStep, emit);

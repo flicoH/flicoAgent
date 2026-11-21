@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { createHash, createHmac, randomUUID } = require('node:crypto');
-const { mkdtemp, rm } = require('node:fs/promises');
+const { mkdtemp, mkdir, rm, writeFile } = require('node:fs/promises');
 const { IncomingMessage, ServerResponse } = require('node:http');
 const { Duplex } = require('node:stream');
 const { tmpdir } = require('node:os');
@@ -14,6 +14,8 @@ const { LangGraphOrchestratorService } = require('../../dist/ai/runtime/langgrap
 const { ExecutorService } = require('../../dist/ai/tool/executor.service');
 const { CheckpointService } = require('../../dist/ai/memory/checkpoint.service');
 const { ThreadService } = require('../../dist/ai/memory/thread.service');
+const { RetrieverService } = require('../../dist/ai/rag/retriever.service');
+const { parseSuite, runSuite } = require('@flicoh/agent/eval');
 const { TraceService } = require('../../dist/ai/trace/trace.service');
 const { AppModule } = require('../../dist/app.module');
 const { RequestValidationPipe } = require('../../dist/common/validation/request-validation.pipe');
@@ -46,6 +48,82 @@ function dispatch(app, method, url, headers, body) {
 }
 
 describe('AI API 权限与执行回归', () => {
+  it('离线评测使用真实同步接口检查工具、引用、权限与记忆', async () => {
+    const fixture = await mkdtemp(join(tmpdir(), 'flico-eval-'));
+    const keyId = 'fixture-eval';
+    const secret = 'fixture-signing-secret';
+    const app = await NestFactory.create(AppModule.register({
+      agentConfig: { threadEnabled: true },
+      ai: {
+        access: { keys: { [keyId]: { secret, agents: ['support'] } } },
+        store: {
+          trace: join(fixture, 'trace'),
+          memory: { path: join(fixture, 'memory') },
+          vector: { path: join(fixture, 'vector.json') },
+        },
+        embedding: { use: { embed: async texts => texts.map(() => [1]) } },
+        llm: { default: 'test', models: { test: { use: { async chat(messages) {
+          const last = messages.at(-1);
+          if (last.role === 'tool') {
+            const { citation } = JSON.parse(last.content).output.hits[0];
+            return { output: `30 days ${citation} [cite:111111111111111111111111]` };
+          }
+          if (last.content === 'refund') {
+            return { output: '', message: { role: 'assistant', content: null, tool_calls: [
+              { id: 'retrieve-refund', type: 'function', function: { name: 'retrieve', arguments: '{"query":"refund"}' } },
+            ] } };
+          }
+          if (last.content === 'recall') {
+            return { output: messages.find(message => message.content === 'store cedar-17') ? 'cedar-17' : 'unknown' };
+          }
+          return { output: 'stored' };
+        } } } } },
+      },
+    }), { logger: false, rawBody: true });
+
+    try {
+      await app.init();
+      app.get(AgentScannerService).get = name => ({ name, skills: [], tools: name === 'support' ? ['retrieve'] : [] });
+      const docs = join(fixture, 'docs');
+      await mkdir(docs);
+      await writeFile(join(docs, 'policy.md'), 'Refunds within 30 days');
+      await app.get(RetrieverService).ingestFromDirectory(docs);
+      const suite = parseSuite({ cases: [
+        { id: 'rag', agent: 'support', turns: [
+          { input: 'refund', assert: { toolsUsed: ['retrieve'], citationDocIds: ['policy.md'] } },
+        ] },
+        { id: 'memory', agent: 'support', turns: [
+          { input: 'store cedar-17' }, { input: 'recall', assert: { outputContains: 'cedar-17' } },
+        ] },
+        { id: 'permissions', agent: 'admin', turns: [{ input: 'refund', expectStatus: 403 }] },
+      ] });
+
+      const path = '/api/ai/agent/run';
+      let firstRequest;
+      const report = await runSuite(suite, async request => {
+        const raw = JSON.stringify(request);
+        const time = String(Date.now());
+        const nonce = randomUUID();
+        const digest = createHash('sha256').update(raw).digest('hex');
+        const signature = createHmac('sha256', secret).update([keyId, 'POST', path, time, nonce, digest].join('\n')).digest('hex');
+        const headers = { 'x-agent-key-id': keyId, 'x-agent-nonce': nonce, s_t: time, s_sign: signature,
+          'content-type': 'application/json', 'content-length': Buffer.byteLength(raw) };
+        firstRequest ??= { headers, raw };
+        const result = await dispatch(app, 'POST', path, headers, raw);
+        return { status: result.status, body: JSON.parse(result.body) };
+      });
+      assert.equal(report.passed, 3, JSON.stringify(report));
+      assert.equal(report.cases[2].turns[0].httpStatus, 403);
+      assert.doesNotMatch(JSON.stringify(report), /cedar-17|Refunds within|fixture-signing-secret/);
+      const trace = await app.get(TraceService).load(report.cases[0].turns[0].runId);
+      assert.deepEqual(trace.citations.map(citation => citation.docId), ['policy.md']);
+      assert.equal((await dispatch(app, 'POST', path, firstRequest.headers, firstRequest.raw)).status, 401);
+    } finally {
+      await app.close();
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
   it('按 Agent 白名单和 Schema 执行，逐一回填同轮所有 tool_call ID', async () => {
     const schema = { type: 'object', required: ['item'], properties: { item: { type: 'string' } } };
     const executed = [];

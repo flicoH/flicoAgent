@@ -10,7 +10,8 @@
     "app",
     "config",
     "model",
-    "docs/openapi.json"
+    "docs",
+    "sdd/agent-operations/eval-suite.example.json"
   ],
   "bin": {
     "flico-agent-eval": "./dist/ai/eval/cli.js"
@@ -19,7 +20,7 @@
     "eval": "node dist/ai/eval/cli.js",
     "build": "nest build",
     "build:watch": "nest build --watch",
-    "prepublishOnly": "npm run build",
+    "prepack": "npm run build && node -e \"require('node:fs').chmodSync('dist/ai/eval/cli.js', 0o755)\"",
     "lint": "eslint --quiet --ext .js,.vue .",
     "test": "__ENV='local' mocha --recursive ./test/**/*.test.js"
   },
@@ -95,6 +96,10 @@
     "./nest": {
       "types": "./nest.d.ts",
       "default": "./dist/nest-public.js"
+    },
+    "./eval": {
+      "types": "./dist/ai/eval/run-suite.d.ts",
+      "default": "./dist/ai/eval/run-suite.js"
     },
     "./eval/assertions": "./dist/ai/eval/assertions.js",
     "./assertions": "./dist/ai/eval/assertions.js",

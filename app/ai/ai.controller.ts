@@ -54,8 +54,8 @@ function resolveAgentRun(body: AgentRunRequest): AgentRunRequest {
  * AI 综合控制器 (AiController)
  *
  * 【安全与鉴权机制】
- * 路由挂载于 `/api/ai/*`，受框架全局 `ApiSignGuard` 校验保护（施工单密钥 + 时间戳签名），
- * 不进入免签白名单，确保线上生产调用的安全性。
+ * 路由挂载于 `/api/ai/*`，由全局 `ApiSignGuard` 校验。配置 `ai.access` 后，
+ * Agent 运行和 Trace 路由会根据调用方的签名或会话确定访问范围。
  *
  * 【接口能力分布】
  * 1. Agent 任务执行：
