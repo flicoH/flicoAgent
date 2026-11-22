@@ -86,6 +86,8 @@ export interface Citation {
   docId: string;
   chunkId: string;
   score: number;
+  kind?: 'wiki';
+  pageId?: string;
 }
 
 /**
@@ -144,6 +146,8 @@ export interface RunResult {
 export interface AgentRunAccess {
   scope?: string;
   agents?: readonly string[];
+  ragRead?: boolean;
+  ingest?: boolean;
 }
 
 /** 持久化存储的完整运行链路。 */
@@ -294,6 +298,53 @@ export interface EmbeddingProvider {
    * @returns 对应文本的高维向量浮点数数组列表 (number[][])
    */
   embed(texts: string[]): Promise<number[][]>;
+}
+
+export interface AgentConfigResponse {
+  threadEnabled: boolean;
+  maxIterations: number;
+  memory: {
+    maxTurns: number;
+  };
+  llm: {
+    default: string | null;
+    models: string[];
+  };
+  embedding: {
+    default: string | null;
+    models: string[];
+  };
+  rag: {
+    mode: 'rag' | 'wiki' | 'hybrid';
+    topK: number;
+    chunk: {
+      size: number;
+      overlap: number;
+    };
+    tool: {
+      name: string;
+      description: string;
+    };
+    wiki: {
+      model: string | null;
+    };
+    source: {
+      driver: 'file' | 'mysql';
+      collection?: string;
+    };
+    vector: {
+      driver: 'file' | 'mysql' | 'qdrant';
+      namespace?: string;
+      dimensions?: number;
+    };
+  };
+  mcp: {
+    enabled: boolean;
+    servers: string[];
+  };
+  guardrail: {
+    enabled: boolean;
+  };
 }
 
 export type PlanActionType = PlanAction['type'];

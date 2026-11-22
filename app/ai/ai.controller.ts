@@ -15,9 +15,12 @@ import type { Request, Response } from 'express';
 import { ConfigService } from '../config/config.service';
 import { isAgentLoopMode } from './agent/agent.interface';
 import { AgentScannerService } from './agent/agent-scanner.service';
-import { resolveThreadEnabled } from './memory/internal/load-memory-config';
+import { resolveGuardrailRuleSet } from './guardrail/internal/load-guardrail-config';
+import { resolveMemoryMaxTurns, resolveThreadEnabled } from './memory/internal/load-memory-config';
+import { resolveRagOptions } from './rag/internal/load-rag-config';
+import { resolveMaxIterations } from './runtime/internal/load-runtime-config';
 import { LangGraphOrchestratorService } from './runtime/langgraph/langgraph-orchestrator.service';
-import { AgentRunAccess, RunResult, RuntimeEvent } from './contracts';
+import { AgentConfigResponse, AgentRunAccess, RunResult, RuntimeEvent } from './contracts';
 import { ToolRegistryService } from './tool/tool-registry.service';
 import { TraceService } from './trace/trace.service';
 
@@ -66,7 +69,7 @@ function resolveAgentRun(body: AgentRunRequest): AgentRunRequest {
  *    - GET `/api/ai/trace/:runId`：获取指定运行的完整步骤与事实记录
  * 3. 元数据资产查询：
  *    - GET `/api/ai/agent/list`：查询已注册 Agent 声明列表
- *    - GET `/api/ai/agent/config`：查询是否启用多轮会话
+ *    - GET `/api/ai/agent/config`：查询脱敏后的 AI 与知识库运行配置
  *    - GET `/api/ai/tool/list`：查询已注册 Tool 描述列表
  */
 @Controller('api/ai')
@@ -217,8 +220,84 @@ export class AiController {
   }
 
   @Get('agent/config')
-  getAgentConfig(): { threadEnabled: boolean } {
-    return { threadEnabled: resolveThreadEnabled(this.configService) };
+  getAgentConfig(): AgentConfigResponse {
+    const ai = this.configService.get<Record<string, unknown>>('ai');
+    const llm = (ai?.llm ?? this.configService.get('ai.llm')) as { default?: unknown; models?: unknown } | undefined;
+    const embedding = (ai?.embedding ?? this.configService.get('ai.embedding')) as {
+      default?: unknown; models?: unknown;
+    } | undefined;
+    const mcp = (ai?.mcp ?? this.configService.get('ai.mcp')) as { enabled?: unknown; servers?: unknown } | undefined;
+    const ragOptions = resolveRagOptions(this.configService);
+    const ragSource = (ragOptions.source ?? this.configService.get('ai.rag.source')) as {
+      driver?: unknown; collection?: unknown;
+    } | undefined;
+    const vectorConfig = ((ai?.store as Record<string, unknown> | undefined)?.vector
+      ?? this.configService.get('ai.store.vector')) as {
+      driver?: unknown; namespace?: unknown; dimensions?: unknown;
+    } | string | undefined;
+
+    const modelNames = (value: unknown): string[] => (
+      value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : []
+    );
+    const defaultLlm = typeof llm?.default === 'string' && llm.default.trim() ? llm.default.trim() : null;
+    const defaultEmbedding = typeof embedding?.default === 'string' && embedding.default.trim()
+      ? embedding.default.trim() : null;
+    const wikiModel = typeof ragOptions.wiki?.model === 'string' && ragOptions.wiki.model.trim()
+      ? ragOptions.wiki.model.trim() : defaultLlm;
+
+    const sourceDriver = ragSource?.driver === 'mysql' ? 'mysql' : 'file';
+    const vectorObj = vectorConfig && typeof vectorConfig === 'object' ? vectorConfig : undefined;
+    const vectorDriver = vectorObj?.driver === 'mysql' || vectorObj?.driver === 'qdrant' ? vectorObj.driver : 'file';
+    const guardrail = resolveGuardrailRuleSet(this.configService);
+
+    return {
+      threadEnabled: resolveThreadEnabled(this.configService),
+      maxIterations: resolveMaxIterations(this.configService),
+      memory: {
+        maxTurns: resolveMemoryMaxTurns(this.configService),
+      },
+      llm: {
+        default: defaultLlm,
+        models: modelNames(llm?.models),
+      },
+      embedding: {
+        default: defaultEmbedding,
+        models: modelNames(embedding?.models),
+      },
+      rag: {
+        mode: ragOptions.mode,
+        topK: ragOptions.topK,
+        chunk: ragOptions.chunk,
+        tool: ragOptions.tool,
+        wiki: { model: wikiModel },
+        source: {
+          driver: sourceDriver,
+          ...(sourceDriver === 'mysql'
+            ? { collection: typeof ragSource?.collection === 'string' ? ragSource.collection : 'default' }
+            : {}),
+        },
+        vector: {
+          driver: vectorDriver,
+          ...(vectorDriver !== 'file'
+            ? { namespace: typeof vectorObj?.namespace === 'string' ? vectorObj.namespace : 'default' }
+            : {}),
+          ...(vectorDriver === 'qdrant' && typeof vectorObj?.dimensions === 'number'
+            ? { dimensions: vectorObj.dimensions } : {}),
+        },
+      },
+      mcp: {
+        enabled: Boolean(mcp?.enabled),
+        servers: Array.isArray(mcp?.servers)
+          ? mcp.servers
+            .map(server => (server && typeof server === 'object' && typeof (server as { name?: unknown }).name === 'string'
+              ? (server as { name: string }).name.trim() : ''))
+            .filter(Boolean)
+          : [],
+      },
+      guardrail: {
+        enabled: Boolean(guardrail.blockedKeywords?.length || guardrail.blockedPatterns?.length),
+      },
+    };
   }
 
   /**

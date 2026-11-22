@@ -76,6 +76,7 @@ export class TraceService {
     if ((step.type === 'final' || step.type === 'guardrail') && typeof step.output === 'string') {
       run.output = step.output;
       if (step.citations?.length) run.citations = step.citations;
+      else delete run.citations;
     }
     run.updatedAt = new Date().toISOString();
     await this.store.save(run);

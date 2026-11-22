@@ -95,16 +95,47 @@ describe('Nest 配置与全局注入', () => {
     }
   });
 
-  it('DatabaseProvider 使用合并后的 db 创建 knex', async () => {
-    writeConfig('config.default.js', { db: { client: 'mysql', connection: { host: 'default' } } });
-    writeConfig('config.local.js', { db: { client: 'mysql', connection: { host: 'overlay' } } });
+  it('DatabaseProvider 使用合并后的 db 创建 knex，应用关闭时释放连接池', async () => {
+    writeConfig('config.default.js', { db: { client: 'mysql2', connection: { host: 'default' } } });
+    writeConfig('config.local.js', { db: { client: 'mysql2', connection: { host: 'overlay' } } });
     const app = await NestFactory.createApplicationContext(AppModule.register({}), { logger: false });
     const database = app.get(DatabaseProvider);
     try {
       assert.strictEqual(database.knex.client.config.connection.host, 'overlay');
+      assert.ok(database.knex.client.pool);
     } finally {
-      await database.knex.destroy();
       await app.close();
+    }
+    assert.strictEqual(database.knex.client.pool, undefined);
+  });
+
+  it('包入口与 nest 入口对外导出配置服务、存储 Token 和声明类型', () => {
+    const pkg = require('../../index');
+    const nestPublic = require('../../dist/nest-public');
+    for (const target of [pkg, nestPublic]) {
+      assert.strictEqual(target.ConfigService, ConfigService);
+      assert.strictEqual(typeof target.TRACE_STORE, 'symbol');
+      assert.strictEqual(typeof target.MEMORY_STORE, 'symbol');
+      assert.strictEqual(typeof target.VECTOR_STORE, 'symbol');
+      assert.strictEqual(typeof target.RagModule, 'function');
+      assert.strictEqual(typeof target.RetrieverService, 'function');
+    }
+
+    const indexTypes = fs.readFileSync(path.resolve(__dirname, '../../index.d.ts'), 'utf8');
+    const nestTypes = fs.readFileSync(path.resolve(__dirname, '../../dist/nest-public.d.ts'), 'utf8');
+    assert.match(indexTypes, /options\?: BootstrapOptions/);
+    for (const symbol of [
+      'BootstrapOptions',
+      'AiOptions',
+      'RagMode',
+      'RagOptions',
+      'RagSourceOptions',
+      'VectorStore',
+      'VectorStoreOptions',
+      'WikiSourceReference',
+      'ConfigService',
+    ]) {
+      assert.ok(nestTypes.includes(symbol), `Missing exported symbol: ${symbol}`);
     }
   });
 });

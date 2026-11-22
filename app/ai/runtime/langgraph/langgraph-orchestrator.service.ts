@@ -166,7 +166,12 @@ export class LangGraphOrchestratorService {
       : SCOPED_CHECKPOINT_PREFIX + createHash('sha256').update(JSON.stringify([run.scope, threadId])).digest('hex');
     const { checkpoint, contextMessages } = await this.loadHistoricalContext(threadEnabled, checkpointId);
     const userInputText = this.normalizeInputText(input);
-    const messages = this.buildInitialMessages(agent.prompt, contextMessages, userInputText);
+    const retrieveTool = resolveRagOptions(this.config).tool.name || 'retrieve';
+    const citationInstructions = '使用知识库片段作为依据时，在对应的正文陈述后原样插入该片段的 citation 标记。只引用本轮检索且用于回答的证据。';
+    const prompt = agent.tools.includes(retrieveTool)
+      ? [agent.prompt, citationInstructions].filter(Boolean).join('\n\n')
+      : agent.prompt;
+    const messages = this.buildInitialMessages(prompt, contextMessages, userInputText);
     const steps: Step[] = [];
 
     // 4. 将 Agent 白名单内的 Skill 与 Tool（含 MCP）适配为 LangChain StructuredTool
@@ -217,6 +222,10 @@ export class LangGraphOrchestratorService {
           runId: run.runId, agent: agentName, parentRunId: run.parentRunId, scope: run.scope,
         }, agent, Boolean(run.parentRunId)),
       recordStep: async (step: GraphStep) => {
+        if (step.type === 'final' && typeof step.output === 'string') {
+          const citations = collectCitations(step.output, steps, retrieveTool);
+          if (citations.length) step = { ...step, citations };
+        }
         await this.recordStep(run.runId, steps, step, emit);
       },
     });
@@ -237,9 +246,11 @@ export class LangGraphOrchestratorService {
     );
 
     const finalOutput = finalState.finalAnswer ?? '';
-    let citations: Citation[] = [];
-    if (steps.at(-1)?.type !== 'final') {
-      citations = collectCitations(finalOutput, steps, resolveRagOptions(this.config).tool.name || 'retrieve');
+    const lastStep = steps.at(-1);
+    const citations = lastStep?.type === 'final'
+      ? lastStep.citations ?? []
+      : collectCitations(finalOutput, steps, retrieveTool);
+    if (lastStep?.type !== 'final') {
       await this.recordFinalStep(run.runId, steps, finalState.iteration, finalOutput, citations, emit);
     }
 

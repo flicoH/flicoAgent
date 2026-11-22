@@ -43,11 +43,13 @@ export class GuardrailService {
     for (const pattern of blockedPatterns) {
       if (pattern) {
         try {
-          const regex = new RegExp(pattern, 'i');
+          const regex = pattern instanceof RegExp
+            ? new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, ''))
+            : new RegExp(pattern, 'i');
           if (regex.test(input)) {
             return {
               safe: false,
-              reason: `触发安全规则：匹配违禁模式「${pattern}」`,
+              reason: `触发安全规则：匹配违禁模式「${pattern instanceof RegExp ? pattern.source : pattern}」`,
             };
           }
         } catch {

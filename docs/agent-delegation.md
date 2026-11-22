@@ -1,5 +1,7 @@
 # Agent 委派接入示例
 
+中文 | [English](agent-delegation.en.md)
+
 父 Agent 用 `delegates` 声明允许直接调用的目标。框架向模型提供 `agent-delegate`，参数为 `{ agent, input }`，其中 `input` 是非空文本。子 Agent 使用自己的模型、提示词和 Skill/Tool 白名单，独立创建 Trace 和线程，仅接收委派输入。子运行仍经过 Guardrail。需要人工审批的能力在子运行中返回 `DELEGATE_APPROVAL_REQUIRED`。
 
 | 配置项 | 默认值 | 计数方式 |

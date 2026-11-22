@@ -1,7 +1,7 @@
 import type { BuiltinToolFactory } from '../tool.interface';
 import { ConfigService } from '../../../config/config.service';
 import { retrievalOutput } from '../../rag/citations';
-import { resolveRagOptions } from '../../rag/internal/load-rag-config';
+import { DEFAULT_RAG_OPTIONS, resolveRagOptions } from '../../rag/internal/load-rag-config';
 import { RetrieverService } from '../../rag/retriever.service';
 
 /**
@@ -9,7 +9,7 @@ import { RetrieverService } from '../../rag/retriever.service';
  */
 function parseRetrieveInput(input: unknown): string {
   if (typeof input === 'string') {
-    return input.trim();
+    if (input.trim()) return input.trim();
   }
   if (input && typeof input === 'object') {
     const q = (input as { query?: unknown }).query;
@@ -26,8 +26,7 @@ function parseRetrieveInput(input: unknown): string {
  * 【约束规范】
  * 1. name 与 description 优先从 ai.rag.tool 读取，未配置时使用框架通用默认文案；
  * 2. inputSchema 仅开放 query 字段，topK 不开放给模型猜，由系统配置决定；
- * 3. execute 调用 RetrieverService.retrieve，标记 source: 'builtin'；
- * 4. output 包含 hits[]: { docId, text, score, ... }。
+ * 3. execute 检索配置的知识库，返回命中及正文引用标记。
  */
 const retrieveTool: BuiltinToolFactory = ({ moduleRef }) => {
   const config = moduleRef.get(ConfigService, { strict: false });
@@ -35,7 +34,7 @@ const retrieveTool: BuiltinToolFactory = ({ moduleRef }) => {
 
   const name = ragOptions.tool?.name || 'retrieve';
   const description = ragOptions.tool?.description
-    || '从私有知识库检索相关片段；回答必须引用返回的 docId/text';
+    || DEFAULT_RAG_OPTIONS.tool.description;
 
   return {
     name,
@@ -58,7 +57,7 @@ const retrieveTool: BuiltinToolFactory = ({ moduleRef }) => {
         throw new Error('RetrieverService is not available in moduleRef');
       }
 
-      const { hits } = await retriever.retrieve(query);
+      const { hits } = await retriever.preview(undefined, query);
       return retrievalOutput(hits);
     },
   };

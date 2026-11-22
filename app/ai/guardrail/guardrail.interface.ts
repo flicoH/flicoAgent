@@ -4,8 +4,8 @@
 export interface GuardrailRuleSet {
   /** 违禁关键词黑名单，只要输入中包含任一关键词即判定违规拦截 */
   blockedKeywords?: string[];
-  /** 违禁正则表达式模式黑名单，只要输入匹配任一模式即判定违规拦截 */
-  blockedPatterns?: string[];
+  /** 违禁正则表达式模式黑名单（支持字符串或 RegExp 实例），只要输入匹配任一模式即判定违规拦截 */
+  blockedPatterns?: Array<string | RegExp>;
 }
 
 /**

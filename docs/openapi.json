@@ -176,6 +176,7 @@
     "/api/ai/rag/documents": {
       "get": {
         "summary": "列出知识库索引中的文档",
+        "description": "需要 ragRead 或 ingest 权限。",
         "responses": {
           "200": {
             "description": "成功。",
@@ -205,10 +206,11 @@
       },
       "delete": {
         "summary": "删除文档的索引切片",
+        "description": "需要 ingest 权限。保留原文，后续重建会重新索引仍在配置来源中的文档。",
         "requestBody": {
           "required": true,
           "content": {
-            "application/json": {"schema": {"type": "object", "properties": {"docId": {"type": "string", "maxLength": 1024}}, "required": ["docId"]}}
+            "application/json": {"schema": {"type": "object", "properties": {"docId": {"type": "string", "minLength": 1, "maxLength": 1024}}, "required": ["docId"]}}
           }
         },
         "responses": {
@@ -233,13 +235,15 @@
           },
           "401": {"description": "未通过 AI 身份验证。"},
           "403": {"description": "调用方缺少此操作所需权限。"},
+          "400": {"description": "docId 参数无效。"},
           "404": {"description": "文档未建立索引。"}
         }
       }
     },
     "/api/ai/rag/rebuild": {
       "post": {
-        "summary": "从配置目录重建知识库索引",
+        "summary": "从配置来源重建知识库索引",
+        "description": "需要 ingest 权限。重建成功后原子发布。读取或向量化失败的文档保留上次结果。",
         "responses": {
           "201": {
             "description": "成功。",
@@ -254,20 +258,22 @@
             }
           },
           "401": {"description": "未通过 AI 身份验证。"},
-          "403": {"description": "调用方缺少此操作所需权限。"}
+          "403": {"description": "调用方缺少此操作所需权限。"},
+          "404": {"description": "配置的本地源目录不存在，旧索引保留。"}
         }
       }
     },
     "/api/ai/rag/preview": {
       "post": {
         "summary": "预览知识库检索结果",
+        "description": "需要 ragRead 或 ingest 权限。与内置 retrieve 使用同一检索链路。",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
-                "properties": {"query": {"type": "string", "maxLength": 4096}, "topK": {"type": "integer", "minimum": 1, "maximum": 100}},
+                "properties": {"query": {"type": "string", "minLength": 1, "maxLength": 4096}, "topK": {"type": "integer", "minimum": 1, "maximum": 100}},
                 "required": ["query"]
               }
             }
@@ -293,6 +299,7 @@
               }
             }
           },
+          "400": {"description": "query 或 topK 参数无效。"},
           "401": {"description": "未通过 AI 身份验证。"},
           "403": {"description": "调用方缺少此操作所需权限。"}
         }
@@ -301,7 +308,8 @@
     "/api/ai/rag/chunk": {
       "get": {
         "summary": "按引用的 chunkId 定位切片",
-        "parameters": [{"name": "id", "in": "query", "schema": {"type": "string"}, "required": true}],
+        "description": "需要 ragRead 或 ingest 权限。只查询当前索引，历史版本可通过运行 Trace 回看。",
+        "parameters": [{"name": "id", "in": "query", "schema": {"type": "string", "minLength": 1, "maxLength": 4096}, "required": true}],
         "responses": {
           "200": {
             "description": "成功。",
@@ -309,15 +317,66 @@
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RagHit"}},
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/RagChunk"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "id 参数无效。"},
+          "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"},
+          "404": {"description": "切片不存在于当前索引。"}
+        }
+      }
+    },
+    "/api/ai/rag/wiki/pages": {
+      "get": {
+        "summary": "列出已发布的 Wiki 页面",
+        "description": "需要 ragRead 或 ingest 权限。",
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {"type": "array", "items": {"$ref": "#/components/schemas/WikiPageSummary"}}
+                  },
                   "required": ["success", "data"]
                 }
               }
             }
           },
           "401": {"description": "未通过 AI 身份验证。"},
+          "403": {"description": "调用方缺少此操作所需权限。"}
+        }
+      }
+    },
+    "/api/ai/rag/wiki/page": {
+      "get": {
+        "summary": "读取 Wiki 页面与原文依据",
+        "description": "需要 ragRead 或 ingest 权限。",
+        "parameters": [{"name": "id", "in": "query", "schema": {"type": "string", "minLength": 1, "maxLength": 80}, "required": true}],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/WikiPage"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "id 参数无效。"},
+          "401": {"description": "未通过 AI 身份验证。"},
           "403": {"description": "调用方缺少此操作所需权限。"},
-          "404": {"description": "切片不存在。"}
+          "404": {"description": "页面不存在于当前 Wiki 索引。"}
         }
       }
     },
@@ -443,6 +502,20 @@
             "description": "成功。",
             "content": {
               "application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Agent"}}}
+            }
+          },
+          "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"}
+        }
+      }
+    },
+    "/api/ai/agent/config": {
+      "get": {
+        "summary": "读取脱敏后的 AI 与知识库运行配置",
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {"schema": {"$ref": "#/components/schemas/AgentConfig"}}
             }
           },
           "401": {"description": "缺少有效的 AI 请求签名或业务登录授权。"}
@@ -578,7 +651,11 @@
     "schemas": {
       "Citation": {
         "type": "object",
-        "properties": {"ref": {"type": "string"}, "docId": {"type": "string"}, "chunkId": {"type": "string"}, "score": {"type": "number"}},
+        "properties": {
+          "ref": {"type": "string"}, "docId": {"type": "string"}, "chunkId": {"type": "string"}, "score": {"type": "number"},
+          "kind": {"const": "wiki"},
+          "pageId": {"type": "string", "description": "Wiki 引用所属的页面 ID。"}
+        },
         "required": ["ref", "docId", "chunkId", "score"]
       },
       "PendingApproval": {
@@ -603,17 +680,96 @@
         },
         "required": ["runId", "agent", "threadId", "status", "createdAt", "updatedAt"]
       },
-      "RagHit": {
+      "RagChunk": {
         "type": "object",
         "properties": {
           "id": {"type": "string"},
           "docId": {"type": "string"},
           "text": {"type": "string"},
-          "score": {"type": "number"},
           "citation": {"type": "string"},
-          "meta": {"type": "object"}
+          "meta": {
+            "type": "object",
+            "properties": {
+              "relativePath": {"type": "string", "description": "文件来源的相对路径，数据库来源的文档 ID。"},
+              "source": {"type": "string", "enum": ["file", "mysql"]},
+              "collection": {"type": "string", "description": "MySQL 原文所属集合。"},
+              "kind": {"const": "wiki"},
+              "wiki": {
+                "type": "object",
+                "properties": {
+                  "pageId": {"type": "string"},
+                  "title": {"type": "string"},
+                  "heading": {"type": "string"},
+                  "sources": {"type": "array", "items": {"$ref": "#/components/schemas/WikiSourceReference"}}
+                },
+                "required": ["pageId", "title", "heading", "sources"]
+              },
+              "version": {"type": "string", "description": "原文内容的 SHA-256 十六进制摘要。"},
+              "start": {"type": "integer", "minimum": 0, "description": "原文 UTF-16 起始下标。"},
+              "end": {"type": "integer", "minimum": 0, "description": "原文 UTF-16 结束下标，切片范围不含这个位置。"}
+            },
+            "required": ["relativePath"]
+          }
         },
-        "required": ["id", "docId", "text", "score", "citation"]
+        "required": ["id", "docId", "text", "citation", "meta"]
+      },
+      "RagHit": {
+        "allOf": [
+          {"$ref": "#/components/schemas/RagChunk"},
+          {"type": "object", "properties": {"score": {"type": "number"}}, "required": ["score"]}
+        ]
+      },
+      "WikiSourceReference": {
+        "type": "object",
+        "properties": {
+          "chunkId": {"type": "string"},
+          "docId": {"type": "string"},
+          "version": {"type": "string"},
+          "text": {"type": "string", "description": "生成章节时引用的原文切片。"},
+          "start": {"type": "integer", "minimum": 0},
+          "end": {"type": "integer", "minimum": 0},
+          "source": {"type": "string", "enum": ["file", "mysql"]},
+          "collection": {"type": "string"}
+        },
+        "required": ["chunkId", "docId", "version", "text"]
+      },
+      "WikiPageSummary": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "sections": {"type": "integer", "minimum": 1}
+        },
+        "required": ["id", "title", "sections"]
+      },
+      "WikiPage": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "title": {"type": "string"},
+          "markdown": {"type": "string"},
+          "links": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {"id": {"type": "string"}, "title": {"type": "string"}},
+              "required": ["id", "title"]
+            }
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "chunkId": {"type": "string"},
+                "heading": {"type": "string"},
+                "sources": {"type": "array", "items": {"$ref": "#/components/schemas/WikiSourceReference"}}
+              },
+              "required": ["chunkId", "heading", "sources"]
+            }
+          }
+        },
+        "required": ["id", "title", "markdown", "links", "sections"]
       },
       "Error": {
         "type": "object",
@@ -758,10 +914,19 @@
       "RagIngestResult": {
         "type": "object",
         "properties": {
-          "ingested": {"type": "integer"},
-          "chunks": {"type": "integer"},
+          "ingested": {"type": "integer", "minimum": 0, "description": "扫描到的文档数。"},
+          "chunks": {"type": "integer", "minimum": 0, "description": "本次写入的切片数。"},
           "succeeded": {"type": "array", "items": {"type": "string"}},
           "skipped": {"type": "array", "items": {"type": "string"}},
+          "wiki": {
+            "type": "object",
+            "properties": {
+              "pages": {"type": "integer", "minimum": 0},
+              "sections": {"type": "integer", "minimum": 0},
+              "generatedSections": {"type": "integer", "minimum": 0}
+            },
+            "required": ["pages", "sections", "generatedSections"]
+          },
           "failed": {
             "type": "array",
             "items": {
@@ -799,6 +964,88 @@
           "model": {"type": "string"}
         },
         "required": ["name", "skills", "tools"]
+      },
+      "AgentConfig": {
+        "type": "object",
+        "properties": {
+          "threadEnabled": {"type": "boolean"},
+          "maxIterations": {"type": "integer", "minimum": 1},
+          "memory": {
+            "type": "object",
+            "properties": {"maxTurns": {"type": "integer", "minimum": 1}},
+            "required": ["maxTurns"]
+          },
+          "llm": {
+            "type": "object",
+            "properties": {
+              "default": {"type": ["string", "null"]},
+              "models": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["default", "models"]
+          },
+          "embedding": {
+            "type": "object",
+            "properties": {
+              "default": {"type": ["string", "null"]},
+              "models": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["default", "models"]
+          },
+          "rag": {
+            "type": "object",
+            "properties": {
+              "mode": {"type": "string", "enum": ["rag", "wiki", "hybrid"]},
+              "topK": {"type": "integer", "minimum": 1},
+              "chunk": {
+                "type": "object",
+                "properties": {"size": {"type": "integer", "minimum": 1}, "overlap": {"type": "integer", "minimum": 0}},
+                "required": ["size", "overlap"]
+              },
+              "tool": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["name", "description"]
+              },
+              "wiki": {
+                "type": "object",
+                "properties": {"model": {"type": ["string", "null"]}},
+                "required": ["model"]
+              },
+              "source": {
+                "type": "object",
+                "properties": {
+                  "driver": {"type": "string", "enum": ["file", "mysql"]},
+                  "collection": {"type": "string"}
+                },
+                "required": ["driver"]
+              },
+              "vector": {
+                "type": "object",
+                "properties": {
+                  "driver": {"type": "string", "enum": ["file", "mysql", "qdrant"]},
+                  "namespace": {"type": "string"},
+                  "dimensions": {"type": "integer", "minimum": 1}
+                },
+                "required": ["driver"]
+              }
+            },
+            "required": ["mode", "topK", "chunk", "tool", "wiki", "source", "vector"]
+          },
+          "mcp": {
+            "type": "object",
+            "properties": {
+              "enabled": {"type": "boolean"},
+              "servers": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["enabled", "servers"]
+          },
+          "guardrail": {
+            "type": "object",
+            "properties": {"enabled": {"type": "boolean"}},
+            "required": ["enabled"]
+          }
+        },
+        "required": ["threadEnabled", "maxIterations", "memory", "llm", "embedding", "rag", "mcp", "guardrail"]
       },
       "Graph": {
         "type": "object",

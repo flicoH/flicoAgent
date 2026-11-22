@@ -7,6 +7,7 @@ import type { AgentRunAccess } from '../../ai/contracts';
 import { ConfigService } from '../../config/config.service';
 
 const agentRoute = /^\/api\/ai\/(?:agent\/run(?:\/stream)?|trace\/[^/]+(?:\/usage)?)\/?$/i;
+const ragRoute = /^\/api\/ai\/rag\/(?:documents|rebuild|preview|chunk|wiki\/(?:pages|page))\/?$/i;
 const signingWindowMs = 5 * 60 * 1000;
 
 interface AgentAccessConfig {
@@ -23,17 +24,23 @@ export class ApiSignGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean | Promise<boolean> {
     const request = context.switchToHttp().getRequest<RawBodyRequest<Request>>();
 
-    if (agentRoute.test(request.path)) {
+    const ragManagement = ragRoute.test(request.path);
+    if (ragManagement || agentRoute.test(request.path)) {
       const access = this.config.get<AgentAccessConfig>('ai.access');
       if (request.headers['x-agent-key-id'] !== undefined || request.headers['x-agent-nonce'] !== undefined) {
         this.verifyAgentSignature(request, access?.keys);
         return true;
       }
       if (access?.authorize) {
-        this.verifyLegacySignature(request);
+        try {
+          this.verifyLegacySignature(request);
+        } catch (error) {
+          if (ragManagement) throw new UnauthorizedException('RAG signing credentials required');
+          throw error;
+        }
         return this.authorizeSession(request, access.authorize);
       }
-      if (access?.keys && Object.keys(access.keys).length > 0) {
+      if (ragManagement || (access?.keys && Object.keys(access.keys).length > 0)) {
         throw new UnauthorizedException('Agent signing credentials required');
       }
     }
@@ -107,6 +114,11 @@ export class ApiSignGuard implements CanActivate {
       throw new UnauthorizedException('Agent signature nonce was already used');
     }
     this.seenNonces.set(nonceKey, now + signingWindowMs * 2);
-    request.agentRunAccess = { scope: key.scope || keyId, agents: key.agents };
+    request.agentRunAccess = {
+      scope: key.scope || keyId,
+      agents: key.agents,
+      ...(key.ragRead === true ? { ragRead: true } : {}),
+      ...(key.ingest === true ? { ingest: true } : {}),
+    };
   }
 }

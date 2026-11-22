@@ -23,10 +23,32 @@ export interface Chunker {
   chunk(text: string, meta?: Record<string, unknown>): Chunk[];
 }
 
+export type RagMode = 'rag' | 'wiki' | 'hybrid';
+
+export type RagSourceDriver = 'file' | 'mysql';
+
+export interface RagSourceOptions {
+  /** 原文来源驱动，默认 'file' */
+  driver?: RagSourceDriver;
+  /** MySQL 原文表 flico_rag_documents 中的集合名 */
+  collection?: string;
+}
+
 /**
  * RAG 检索增强可配置选项 (RagOptions)
  */
 export interface RagOptions {
+  mode?: RagMode;
+  wiki?: {
+    /** ai.llm.models 中用于编译 Wiki 的模型，默认使用 ai.llm.default。 */
+    model?: string;
+  };
+  /** 原文来源配置 */
+  source?: RagSourceOptions;
+  /** 本地原文目录配置（当 ai.store.vector.fixturesPath 未配置时使用） */
+  fixtures?: {
+    path?: string;
+  };
   /** 文本切分参数 */
   chunk?: {
     /** 单个分块最大字符数，默认 500 */

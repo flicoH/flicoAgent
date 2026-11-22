@@ -1,5 +1,7 @@
 # flicoAgent
 
+中文 | [English](README.en.md)
+
 flicoAgent 是一个基于 NestJS 的应用框架内核，提供项目配置、页面与静态资源服务、业务模块自动发现，以及可选的 LLM、Agent、Skill、MCP、RAG 和会话记忆能力。前端采用 Vue 3、Vite 与 Element Plus。
 
 本仓库包含框架源码和示例页面。框架也支持被业务工程作为 npm 包依赖；业务工程需按下文约定提供配置、页面和模块构建产物。
@@ -101,7 +103,7 @@ node -e "require('@flicoh/agent').frontendBuild('production')"  # 生产构建
 
 ## 配置
 
-复制或创建 `config/config.default.js`。框架默认配置位于包内 `config/config.default.js`；业务工程可在自己的 `config/` 中覆盖。配置加载优先级由低到高为：框架默认配置、业务 `config.default.js`、当前环境配置、`serverStart(options)` 启动参数。`ai` 与 `agentConfig` 对象支持深度合并，其他顶层项按后层覆盖。
+复制或创建 `config/config.default.js`。框架默认配置位于包内 `config/config.default.js`；业务工程可在自己的 `config/` 中覆盖。配置加载优先级由低到高为：框架默认配置、业务 `config.default.js`、当前环境配置、`serverStart(options)` 启动参数。`ai` 与 `agentConfig` 对象支持深度合并，其他顶层项按后层覆盖。TypeScript 工程可从 `@flicoh/agent` 或 `@flicoh/agent/nest` 导入 `BootstrapOptions`、`AiOptions`、`RagOptions`、`RagMode`、`VectorStore`、`ConfigService` 等配置与扩展契约。
 
 环境选择：
 
@@ -177,9 +179,9 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 
 ### 接入 AI API
 
-浏览器继续使用现有签名头。业务工程配置 `ai.access.authorize(request)`，由回调验证真实登录会话，并返回 `{ scope, agents?, skills?, ingest? }`。`scope` 由服务端生成，用于隔离会话与 Trace。可用 `agents` 限制可运行的 Agent，用 `skills` 限制可直调的 Skill。回调返回 `null` 时请求被拒绝。
+浏览器继续使用现有签名头。业务工程配置 `ai.access.authorize(request)`，由回调验证真实登录会话，并返回 `{ scope, agents?, skills?, ragRead?, ingest? }`。`scope` 由服务端生成，用于隔离会话与 Trace。可用 `agents` 限制可运行的 Agent，用 `skills` 限制可直调的 Skill。回调返回 `null` 时请求被拒绝。
 
-服务间调用在服务端配置 `ai.access.keys.<keyId>`，值为 `{ secret, scope?, agents?, skills?, ingest? }`。客户端发送以下请求头。
+服务间调用在服务端配置 `ai.access.keys.<keyId>`，值为 `{ secret, scope?, agents?, skills?, ragRead?, ingest? }`。客户端发送以下请求头。
 
 | 请求头 | 值 |
 | --- | --- |
@@ -197,7 +199,7 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 - Agent 流发送 `start`、`step`、`delta`，成功时以 `done` 收尾。收到 `delta_reset` 时清空当前回答的临时文本，继续保留步骤。Chat 流发送 `delta` 与 `done`。响应开始后的失败以 `error` 事件返回，连接空闲时会发送心跳。
 - Skill 与 Tool 的 `inputSchema` 在执行前校验。`ai.tools.serviceInvoke` 以服务名为键，以开放的方法名数组为值。例如 `{ ProjectService: ['getProjectDetail'] }`。
 - `ai.store.trace.use`、`ai.store.memory.use`、`ai.store.vector.use` 接受存储实例或接收 `ConfigService` 的工厂。跨实例会话存储可实现 `MemoryStore.runTurn`，用共享锁协调同一线程。默认文件存储适用于单实例。
-- `/api/ai/rag/ingest` 需要 `ingest: true`。路径应在 `ai.store.vector.fixturesPath` 或 `ai.rag.fixtures.path` 配置的目录下，默认根目录为 `data/fixtures`。灌库同步选定目录的切片，保留处理失败文档的上次结果。自定义向量存储需要实现 `syncDirectory` 才能使用灌库接口。
+- 知识库提供文档列表、删除索引、重建、检索预览、Wiki 主题页读取和切片定位。原文可来自文件目录或 MySQL，向量索引支持文件、MySQL 和 Qdrant。检索支持原文 RAG、LLM Wiki 和混合模式（`ai.rag.mode`）。连接配置和引用定位见 [RAG 知识库](docs/agent-operations.md#rag-知识库)。
 
 ## npm 脚本
 

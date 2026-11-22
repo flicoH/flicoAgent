@@ -35,19 +35,39 @@ export function resolveGuardrailRuleSet(config: ConfigService): GuardrailRuleSet
     return [];
   };
 
+  const extractPatternArray = (value: unknown): Array<string | RegExp> => {
+    const items = Array.isArray(value) ? value : [value];
+    const results: Array<string | RegExp> = [];
+    for (const item of items) {
+      if (item instanceof RegExp) {
+        results.push(item);
+      } else if (typeof item === 'string' && item.trim().length > 0) {
+        results.push(item.trim());
+      }
+    }
+    return results;
+  };
+
   const blockedKeywords = [
     ...extractStringArray(rawRules.blockedKeywords),
     ...extractStringArray(guardrailConfig.blockedKeywords),
   ];
 
   const blockedPatterns = [
-    ...extractStringArray(rawRules.blockedPatterns),
-    ...extractStringArray(guardrailConfig.blockedPatterns),
+    ...extractPatternArray(rawRules.blockedPatterns),
+    ...extractPatternArray(guardrailConfig.blockedPatterns),
   ];
 
   // 数组去重
+  const seenPatterns = new Set<string>();
+  const uniquePatterns = blockedPatterns.filter(pattern => {
+    const key = pattern instanceof RegExp ? `/${pattern.source}/${pattern.flags}` : `s:${pattern}`;
+    if (seenPatterns.has(key)) return false;
+    seenPatterns.add(key);
+    return true;
+  });
   return {
     blockedKeywords: Array.from(new Set(blockedKeywords)),
-    blockedPatterns: Array.from(new Set(blockedPatterns)),
+    blockedPatterns: uniquePatterns,
   };
 }

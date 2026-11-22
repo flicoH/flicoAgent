@@ -1,6 +1,10 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '../../config/config.service';
+import { DatabaseProvider } from '../../extend/database.provider';
+import { ExtendModule } from '../../extend/extend.module';
 import { StoreModule } from '../store/store.module';
 import { Chunker } from './chunker';
+import { RAG_SOURCE, resolveRagSource } from './rag-source';
 import { RetrieverService } from './retriever.service';
 
 /**
@@ -11,8 +15,16 @@ import { RetrieverService } from './retriever.service';
  * 依赖底层 StoreModule (VectorStore)。
  */
 @Module({
-  imports: [StoreModule],
-  providers: [Chunker, RetrieverService],
+  imports: [StoreModule, ExtendModule],
+  providers: [
+    {
+      provide: RAG_SOURCE,
+      useFactory: (config: ConfigService, database: DatabaseProvider) => resolveRagSource(config, database.knex),
+      inject: [ConfigService, DatabaseProvider],
+    },
+    Chunker,
+    RetrieverService,
+  ],
   exports: [Chunker, RetrieverService],
 })
 export class RagModule {}

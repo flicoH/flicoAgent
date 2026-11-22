@@ -1,151 +1,230 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { existsSync } from 'node:fs';
-import { readdir, readFile } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import type { EmbeddingProvider } from '../contracts';
 import { ConfigService } from '../../config/config.service';
-import { VECTOR_STORE, VectorQueryResult, VectorRecord, VectorStore } from '../store/store.interface';
+import { VECTOR_STORE } from '../store/store.interface';
+import type { IndexedChunk, IndexedDocument, KnowledgeKind, VectorQueryResult, VectorRecord, VectorStore } from '../store/store.interface';
 import { resolveChunker } from './chunker';
 import { resolveEmbedder } from './internal/load-embedding-config';
-import { resolveRagOptions } from './internal/load-rag-config';
-import { Chunk } from './rag.interface';
+import { resolveRagFixturesPath, resolveRagOptions } from './internal/load-rag-config';
+import type { Chunk } from './rag.interface';
+import { directoryRagSource, RAG_SOURCE, RagDirectoryNotFound } from './rag-source';
+import type { RagSource } from './rag-source';
+import { compileWiki, wikiEmbeddingText, wikiPage, wikiPages } from './wiki';
 
-/**
- * 检索结果载荷契约
- */
 export interface RetrieveResult {
-  /** 命中的分块切片数组 */
   hits: VectorQueryResult[];
 }
 
-/**
- * 递归扫描目录下支持的文件。扩展名匹配不区分大小写；符号链接不会作为文件或目录跟随。
- * 目录不存在时视为空知识库，目录读取本身失败则由调用方处理。
- */
-async function scanTextFiles(dir: string): Promise<string[]> {
-  const results: string[] = [];
-  if (!existsSync(dir)) {
-    return results;
-  }
-
-  const entries = await readdir(dir, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      results.push(...(await scanTextFiles(fullPath)));
-    } else if (entry.isFile()) {
-      const name = entry.name.toLowerCase();
-      if (
-        name.endsWith('.md')
-        || name.endsWith('.txt')
-        || name.endsWith('.markdown')
-        || name.endsWith('.json')
-      ) {
-        results.push(fullPath);
-      }
-    }
-  }
-
-  return results;
+export interface RagRebuildResult {
+  ingested: number;
+  chunks: number;
+  succeeded: string[];
+  skipped: string[];
+  failed: { docId: string; stage: 'read' | 'embed' }[];
+  wiki?: { pages: number; sections: number; generatedSections: number };
 }
 
-/**
- * 知识检索器服务 (RetrieverService)
- *
- * 【架构职责】
- * 统一调度文档切分、文本向量化与向量存储库检索：
- * 1. ingestFromDirectory：从指定目录批量读取文件、分块、向量化并持久化至 VectorStore；
- * 2. retrieve：将用户 query 计算为向量并从 VectorStore 中检索 TopK 最相关片段；
- * 3. 严格遵循 ai.rag 配置与框架默认值。
- */
+function fuseRankings(raw: VectorQueryResult[], wiki: VectorQueryResult[], limit: number): VectorQueryResult[] {
+  const ranking = new Map<string, { hit: VectorQueryResult; score: number }>();
+  for (const hits of [raw, wiki]) {
+    for (const [index, hit] of hits.entries()) {
+      const entry = ranking.get(hit.id) ?? { hit, score: 0 };
+      entry.score += 1 / (60 + index + 1);
+      ranking.set(hit.id, entry);
+    }
+  }
+  return [...ranking.values()]
+    .sort((a, b) => b.score - a.score || b.hit.score - a.hit.score || a.hit.id.localeCompare(b.hit.id))
+    .slice(0, Math.max(1, limit)).map(({ hit, score }) => ({ ...hit, score }));
+}
+
+function isEmbedding(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length > 0 && Array.from(value).every(Number.isFinite);
+}
+
+function indexedLocation(text: string, chunk: Chunk): { start: number; end: number } | undefined {
+  const { start, end } = chunk.meta ?? {};
+  if (typeof start !== 'number' || typeof end !== 'number' || !Number.isInteger(start) || !Number.isInteger(end)
+    || start < 0 || start >= end || end > text.length) return undefined;
+  const window = text.slice(start, end);
+  if (window === chunk.text) return { start, end };
+  if (window.trim() !== chunk.text) return undefined;
+  const exactStart = start + window.length - window.trimStart().length;
+  return { start: exactStart, end: exactStart + chunk.text.length };
+}
+
 @Injectable()
 export class RetrieverService {
+  private mutations = Promise.resolve();
+
   constructor(
     @Inject(VECTOR_STORE) private readonly vectorStore: VectorStore,
     private readonly configService: ConfigService,
+    @Inject(RAG_SOURCE) private readonly source: RagSource = directoryRagSource(resolveRagFixturesPath(configService)),
   ) {}
 
-  /**
-   * 从指定目录批量灌入并构建知识库切片
-   *
-   * @param dir 知识库文本根目录绝对路径
-   * @returns 灌库统计：ingested 是扫描到的文件数（包括读取失败的文件），chunks 是写入的切片数
-   */
-  async ingestFromDirectory(dir: string): Promise<{ ingested: number; chunks: number }> {
-    const filePaths = await scanTextFiles(dir);
-    if (filePaths.length === 0) {
-      return { ingested: 0, chunks: 0 };
+  ingestFromDirectory(dir: string): Promise<RagRebuildResult> {
+    return this.mutate(() => this.indexSource(directoryRagSource(dir), false));
+  }
+
+  rebuild(dir?: string): Promise<RagRebuildResult> {
+    return this.mutate(() => this.indexSource(dir === undefined ? this.source : directoryRagSource(dir), true));
+  }
+
+  listDocuments(dir?: string): Promise<IndexedDocument[]> {
+    if (!this.vectorStore.documents) throw new Error('VectorStore does not support listing documents');
+    return this.vectorStore.documents(this.sourceKey(dir));
+  }
+
+  deleteDocument(dir: string | undefined, docId: string): Promise<number> {
+    return this.mutate(async () => {
+      if (!this.vectorStore.removeDocument) throw new Error('VectorStore does not support removing documents');
+      return this.vectorStore.removeDocument(this.sourceKey(dir), docId);
+    });
+  }
+
+  loadChunk(dir: string | undefined, id: string): Promise<IndexedChunk | null> {
+    if (!this.vectorStore.loadChunk) throw new Error('VectorStore does not support loading chunks');
+    return this.vectorStore.loadChunk(this.sourceKey(dir), id);
+  }
+
+  async listWikiPages() {
+    return wikiPages(await this.vectorStore.wikiChunks?.(this.source.key) ?? []);
+  }
+
+  async loadWikiPage(id: string) {
+    return wikiPage(await this.vectorStore.wikiChunks?.(this.source.key) ?? [], id);
+  }
+
+  preview(dir: string | undefined, query: string, topK?: number): Promise<RetrieveResult> {
+    return this.retrieve(query, topK, this.sourceKey(dir));
+  }
+
+  async retrieve(query: string, topK?: number, root?: string): Promise<RetrieveResult> {
+    const { mode, topK: defaultLimit } = resolveRagOptions(this.configService);
+    const limit = topK ?? defaultLimit;
+    if (mode !== 'rag' && !this.vectorStore.wikiChunks) throw new Error('VectorStore does not support Wiki retrieval');
+    const [embedding] = await resolveEmbedder(this.configService).embed([query]);
+    if (!isEmbedding(embedding)) return { hits: [] };
+    if (mode === 'rag') return { hits: await this.vectorStore.query(embedding, limit, root, 'rag') };
+    const search = (kind: KnowledgeKind) => this.vectorStore.query(embedding, limit, root ?? this.source.key, kind);
+    if (mode === 'wiki') return { hits: await search('wiki') };
+    if (this.vectorStore.queryHybrid) {
+      const { rag, wiki } = await this.vectorStore.queryHybrid(embedding, limit, root ?? this.source.key);
+      return { hits: fuseRankings(rag, wiki, limit) };
+    }
+    const [raw, wiki] = await Promise.all([search('rag'), search('wiki')]);
+    return { hits: fuseRankings(raw, wiki, limit) };
+  }
+
+  private mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.mutations.then(operation);
+    this.mutations = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private sourceKey(dir?: string): string {
+    return dir === undefined ? this.source.key : resolve(dir);
+  }
+
+  private async indexSource(source: RagSource, rebuild: boolean): Promise<RagRebuildResult> {
+    if (rebuild && !this.vectorStore.syncDirectory) throw new Error('VectorStore does not support rebuilding the index');
+    const root = source.key;
+    const options = resolveRagOptions(this.configService);
+    const wikiEnabled = options.mode !== 'rag';
+    if (wikiEnabled && (!this.vectorStore.wikiChunks || !this.vectorStore.syncDirectory)) {
+      throw new Error('VectorStore does not support Wiki indexing');
+    }
+    const result: RagRebuildResult = { ingested: 0, chunks: 0, succeeded: [], skipped: [], failed: [] };
+    if (wikiEnabled) result.wiki = { pages: 0, sections: 0, generatedSections: 0 };
+    const documents = await source.documents().catch(error => {
+      // 兼容直接灌库时根目录缺失的空结果。重建时目录扫描必须完整成功。
+      if (!rebuild && error instanceof RagDirectoryNotFound) return null;
+      throw error;
+    });
+    if (!documents?.length) {
+      if (documents && this.vectorStore.syncDirectory) await this.vectorStore.syncDirectory(root, [], new Set());
+      return result;
     }
 
-    const ragOptions = resolveRagOptions(this.configService);
-    const chunker = resolveChunker(ragOptions);
-
-    const allChunks: Array<{ docId: string; text: string; meta?: Record<string, unknown> }> = [];
-
-    for (const filePath of filePaths) {
+    const chunker = resolveChunker(options);
+    const records: VectorRecord[] = [];
+    let embedder: EmbeddingProvider | undefined;
+    let dimensions: number | undefined;
+    for (const { docId, filePath, read } of documents) {
+      const sourceMeta = { ...source.meta, docId, ...(filePath === undefined ? {} : { filePath }) };
+      let text: string;
+      let chunks: Chunk[];
       try {
-        const text = await readFile(filePath, 'utf8');
-        const docId = relative(dir, filePath) || filePath;
-        const chunks: Chunk[] = chunker.chunk(text, { docId, filePath });
+        text = await read();
+        chunks = chunker.chunk(text, { ...sourceMeta });
+      } catch {
+        result.failed.push({ docId, stage: 'read' });
+        continue;
+      }
+      if (!chunks.length) {
+        result.skipped.push(docId);
+        continue;
+      }
 
-        for (const item of chunks) {
-          allChunks.push({
+      try {
+        embedder ??= resolveEmbedder(this.configService);
+        const embeddings = await embedder.embed(chunks.map(chunk => chunk.text));
+        const expectedDimensions = dimensions ?? embeddings[0]?.length;
+        if (embeddings.length !== chunks.length || Array.from(embeddings).some(
+          embedding => !isEmbedding(embedding) || embedding.length !== expectedDimensions,
+        )) throw new Error('Invalid document embeddings');
+        const version = createHash('sha256').update(text).digest('hex');
+        const documentRecords = chunks.map((chunk, index) => {
+          const { start, end, kind, wiki, ...meta } = chunk.meta ?? {};
+          const location = indexedLocation(text, chunk);
+          const identity = JSON.stringify([root, docId, version, index, location, chunk.text]);
+          return {
+            id: createHash('sha256').update(identity).digest('hex'),
             docId,
-            text: item.text,
-            meta: {
-              ...(item.meta ?? {}),
-              docId,
-              filePath,
-            },
-          });
-        }
-      } catch (err: any) {
-        console.warn(`[RetrieverService] failed to read file "${filePath}":`, err.message);
+            root,
+            text: chunk.text,
+            embedding: embeddings[index],
+            meta: { ...meta, ...sourceMeta, relativePath: docId, version, ...location },
+          };
+        });
+        for (const record of documentRecords) records.push(record);
+        dimensions = expectedDimensions;
+        result.succeeded.push(docId);
+      } catch {
+        result.failed.push({ docId, stage: 'embed' });
       }
     }
 
-    if (allChunks.length === 0) {
-      return { ingested: filePaths.length, chunks: 0 };
+    const retain = new Set(result.failed.map(({ docId }) => docId));
+    let wikiRecords: VectorRecord[] = [];
+    if (wikiEnabled) {
+      const previous = await this.vectorStore.wikiChunks!(root);
+      const built = await compileWiki(this.configService, root, records, previous, retain, options.wiki?.model);
+      if (built.sections.length) {
+        embedder ??= resolveEmbedder(this.configService);
+        for (let start = 0; start < built.sections.length; start += 32) {
+          const batch = built.sections.slice(start, start + 32);
+          const vectors = await embedder.embed(batch.map(wikiEmbeddingText));
+          dimensions ??= vectors[0]?.length;
+          if (vectors.length !== batch.length || Array.from(vectors).some(
+            vector => !isEmbedding(vector) || vector.length !== dimensions,
+          )) throw new Error('Invalid Wiki section embeddings');
+          wikiRecords = wikiRecords.concat(batch.map((chunk, index) => ({ ...chunk, root, embedding: vectors[index] })));
+        }
+      }
+      result.wiki = { pages: built.pages, sections: wikiRecords.length, generatedSections: built.generated };
     }
-
-    // 保持切片顺序：下方通过数组下标把向量与原文配对，EmbeddingProvider 需按输入顺序返回。
-    const texts = allChunks.map(c => c.text);
-    const embeddings = await resolveEmbedder(this.configService).embed(texts);
-
-    // ID 的下标来自本次所有文件的切片序列，而非单个文件内的序号。
-    // upsert 只覆盖同 ID 的记录，不会删除前一次灌库留下的其他记录。
-    const records: VectorRecord[] = allChunks.map((chunkItem, idx) => ({
-      id: `${chunkItem.docId}#${idx}`,
-      docId: chunkItem.docId,
-      text: chunkItem.text,
-      embedding: embeddings[idx],
-      meta: chunkItem.meta,
-    }));
-
-    await this.vectorStore.upsert(records);
-
-    return {
-      ingested: filePaths.length,
-      chunks: records.length,
-    };
-  }
-
-  /**
-   * 语义相关度检索
-   *
-   * @param query 检索自然语言输入
-   * @param topK 可选指定返回数量（未传时默认读取 ai.rag.topK）
-   * @returns 命中片段列表对象 { hits: [...] }
-   */
-  async retrieve(query: string, topK?: number): Promise<RetrieveResult> {
-    const ragOptions = resolveRagOptions(this.configService);
-    const limit = topK ?? ragOptions.topK;
-
-    const [queryEmbedding] = await resolveEmbedder(this.configService).embed([query]);
-    if (!queryEmbedding || queryEmbedding.length === 0) {
-      return { hits: [] };
+    if (this.vectorStore.syncDirectory) {
+      await this.vectorStore.syncDirectory(root, records.concat(wikiRecords), retain);
+    } else if (records.length) {
+      // 旧扩展仅支持按旧 ID 更新，保留其直接灌库行为。
+      await this.vectorStore.upsert(records.map((record, index) => ({ ...record, id: `${record.docId}#${index}` })));
     }
-
-    const hits = await this.vectorStore.query(queryEmbedding, limit);
-    return { hits };
+    result.ingested = documents.length;
+    result.chunks = records.length;
+    return result;
   }
 }

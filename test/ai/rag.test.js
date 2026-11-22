@@ -3,8 +3,10 @@ const fs = require('fs');
 const path = require('path');
 const { resolveEmbedder } = require('../../dist/ai/rag/internal/load-embedding-config');
 const { FileVectorStore } = require('../../dist/ai/store/reference/file-vector.store');
+const { resolveVectorStore } = require('../../dist/ai/store/internal/load-store-config');
 const { resolveRagFixturesPath, resolveRagOptions } = require('../../dist/ai/rag/internal/load-rag-config');
 const { chunk, resolveChunker } = require('../../dist/ai/rag/chunker');
+const { collectCitations, retrievalOutput } = require('../../dist/ai/rag/citations');
 const { RetrieverService } = require('../../dist/ai/rag/retriever.service');
 const { ToolRegistryService } = require('../../dist/ai/tool/tool-registry.service');
 
@@ -118,7 +120,7 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
       assert.strictEqual(opts.chunk.overlap, 50);
       assert.strictEqual(opts.topK, 3);
       assert.strictEqual(opts.tool.name, 'retrieve');
-      assert.strictEqual(opts.tool.description, '从私有知识库检索相关片段；回答必须引用返回的 docId/text');
+      assert.match(opts.tool.description, /答案正文原样插入/);
     });
 
     it('纯函数 chunk 按给定 size 与 overlap 均匀切分', () => {
@@ -238,7 +240,7 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
       const retrieveToolDef = registry.get('retrieve');
       assert.ok(retrieveToolDef);
       assert.strictEqual(retrieveToolDef.source, 'builtin');
-      assert.strictEqual(retrieveToolDef.description, '从私有知识库检索相关片段；回答必须引用返回的 docId/text');
+      assert.strictEqual(retrieveToolDef.description, resolveRagOptions({ get: () => undefined }).tool.description);
       assert.deepStrictEqual(retrieveToolDef.inputSchema, {
         type: 'object',
         properties: {
@@ -249,6 +251,177 @@ describe('Embedding · RAG · VectorStore · retrieve tool · ingest', () => {
         },
         required: ['query'],
       });
+    });
+  });
+
+  describe('RAG 管理与引用', () => {
+    function deferred() {
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      return { promise, resolve };
+    }
+
+    it('向量存储配置支持实例和工厂，并校验数据库驱动配置', async () => {
+      const store = new FileVectorStore(path.join(tmpDir, 'configured-vector.json'));
+      const configFor = options => ({ get: key => key === 'ai.store.vector' ? options : undefined });
+      assert.strictEqual(await resolveVectorStore(configFor({ use: store })), store);
+      const factoryConfig = configFor({ use: async config => {
+        assert.strictEqual(config, factoryConfig);
+        return store;
+      } });
+      assert.strictEqual(await resolveVectorStore(factoryConfig), store);
+      await assert.rejects(resolveVectorStore(configFor({ driver: 'mysql' })), /requires a MySQL connection/);
+      await assert.rejects(resolveVectorStore(configFor({ driver: 'qdrant' })), /Qdrant URL and vector dimensions/);
+      await assert.rejects(resolveVectorStore(configFor({ use: {} })), /must provide a VectorStore/);
+    });
+
+    it('重建期间可读旧快照，按调用顺序提交删除，并隔离同名文档', async () => {
+      const docs = path.join(tmpDir, 'snapshot-docs');
+      const otherDocs = path.join(tmpDir, 'snapshot-other');
+      fs.mkdirSync(docs);
+      fs.mkdirSync(otherDocs);
+      const doc = path.join(docs, 'policy.txt');
+      fs.writeFileSync(doc, 'original text');
+      fs.writeFileSync(path.join(otherDocs, 'policy.txt'), 'outside source');
+      const entered = deferred();
+      const release = deferred();
+      let block = true;
+      const embed = async texts => {
+        if (block && texts[0] === '😀 new version') {
+          entered.resolve();
+          await release.promise;
+        }
+        return texts.map(() => [1, 0]);
+      };
+      const store = new FileVectorStore(path.join(tmpDir, 'snapshot-vector.json'));
+      const retriever = new RetrieverService(store, {
+        get: key => key === 'ai.embedding' ? { use: { embed } } : undefined,
+      });
+      await retriever.rebuild(docs);
+      await retriever.rebuild(otherDocs);
+      const old = (await retriever.preview(docs, 'policy')).hits[0];
+      fs.writeFileSync(doc, '  😀 new version\n');
+      const rebuilt = retriever.rebuild(docs);
+      await entered.promise;
+      const deleted = retriever.deleteDocument(docs, 'policy.txt');
+      try {
+        assert.deepStrictEqual((await retriever.preview(docs, 'policy')).hits.map(hit => hit.id), [old.id]);
+        assert.deepStrictEqual(await retriever.listDocuments(docs), [{ docId: 'policy.txt', chunks: 1 }]);
+      } finally {
+        block = false;
+        release.resolve();
+      }
+      await rebuilt;
+      assert.strictEqual(await deleted, 1);
+      assert.deepStrictEqual(await retriever.listDocuments(docs), []);
+      assert.strictEqual((await retriever.preview(otherDocs, 'policy')).hits[0].text, 'outside source');
+      const rebuiltAgain = await retriever.rebuild(docs);
+      assert.deepStrictEqual(rebuiltAgain.succeeded, ['policy.txt']);
+      const current = (await retriever.preview(docs, 'policy')).hits[0];
+      const located = await retriever.loadChunk(docs, current.id);
+      assert.notStrictEqual(current.id, old.id);
+      assert.strictEqual(await retriever.loadChunk(docs, old.id), null);
+      assert.strictEqual(await retriever.loadChunk(otherDocs, current.id), null);
+      assert.match(located.meta.version, /^[a-f0-9]{64}$/);
+      assert.strictEqual(fs.readFileSync(doc, 'utf8').slice(located.meta.start, located.meta.end), current.text);
+      await retriever.rebuild(docs);
+      assert.strictEqual((await retriever.preview(docs, 'policy')).hits[0].id, current.id);
+    });
+
+    it('重建区分无法读取的文件、无切片的文件和不可用的源目录', async () => {
+      const docs = path.join(tmpDir, 'read-errors');
+      fs.mkdirSync(docs);
+      fs.writeFileSync(path.join(docs, 'a.txt'), 'old A');
+      fs.writeFileSync(path.join(docs, 'b.txt'), 'old B');
+      fs.writeFileSync(path.join(docs, 'c.txt'), 'old C');
+      const entered = deferred();
+      const release = deferred();
+      const embed = async texts => {
+        if (texts[0] === 'new A') {
+          entered.resolve();
+          await release.promise;
+        }
+        return texts.map(() => [1]);
+      };
+      const store = new FileVectorStore(path.join(tmpDir, 'read-errors-vector.json'));
+      const retriever = new RetrieverService(store, {
+        get: key => key === 'ai.embedding' ? { use: { embed } } : undefined,
+      });
+      await retriever.rebuild(docs);
+      fs.writeFileSync(path.join(docs, 'a.txt'), 'new A');
+      fs.writeFileSync(path.join(docs, 'c.txt'), '  \n');
+      const rebuilt = retriever.rebuild(docs);
+      await entered.promise;
+      try {
+        fs.unlinkSync(path.join(docs, 'b.txt'));
+      } finally {
+        release.resolve();
+      }
+      assert.deepStrictEqual(await rebuilt, {
+        ingested: 3, chunks: 1, succeeded: ['a.txt'], skipped: ['c.txt'], failed: [{ docId: 'b.txt', stage: 'read' }],
+      });
+      fs.renameSync(docs, docs + '-offline');
+      await assert.rejects(retriever.rebuild(docs), { code: 'ENOENT' });
+      assert.deepStrictEqual((await retriever.preview(docs, 'a')).hits.map(hit => hit.text).sort(), ['new A', 'old B']);
+      fs.mkdirSync(docs);
+      assert.strictEqual((await retriever.rebuild(docs)).ingested, 0);
+      assert.deepStrictEqual(await retriever.listDocuments(docs), []);
+    });
+
+    it('索引写入失败时保留已发布的内存索引，并可继续写入', async () => {
+      const index = path.join(tmpDir, 'published-vector.json');
+      const store = new FileVectorStore(index);
+      const oldRecord = { id: 'old', docId: 'policy', text: 'old', embedding: [1] };
+      const newRecord = { id: 'new', docId: 'policy', text: 'new', embedding: [1] };
+      await store.upsert([oldRecord]);
+      fs.renameSync(index, index + '.backup');
+      fs.mkdirSync(index);
+      await assert.rejects(store.upsert([newRecord]));
+      assert.deepStrictEqual((await store.query([1], 10)).map(hit => hit.id), ['old']);
+      fs.rmdirSync(index);
+      fs.renameSync(index + '.backup', index);
+      await store.upsert([newRecord]);
+      assert.deepStrictEqual((await new FileVectorStore(index).query([1], 10)).map(hit => hit.id), ['old', 'new']);
+    });
+
+    it('引用只匹配本轮成功检索和最终 Markdown 正文，按正文顺序去重', () => {
+      const { hits } = retrievalOutput(
+        ['first', 'second', 'ignored', 'previous', 'failed', 'mcp'].map(id => ({
+          docId: id + '.md', id, text: 'Evidence: ' + id, score: 0.5,
+        })),
+      );
+      const [first, second, ignored, previous, failed, mcp] = hits;
+      const observed = { type: 'tool', name: 'local-retrieve', source: 'builtin' };
+      const steps = [
+        { ...observed, output: { hits: [first, second, ignored] } },
+        { ...observed, error: { code: 'FAIL' }, output: { hits: [failed] } },
+        { ...observed, source: 'mcp', output: { hits: [mcp] } },
+        { type: 'plan', output: ignored.citation },
+      ];
+      const tick = '`';
+      const output = [
+        '> ' + tick.repeat(3) + 'md',
+        '> ' + ignored.citation,
+        '> ' + tick.repeat(3),
+        '',
+        '    ' + ignored.citation,
+        '',
+        tick.repeat(2) + ' ' + ignored.citation + ' ' + tick + ' ' + tick.repeat(2),
+        '\\' + ignored.citation,
+        '<!-- ' + ignored.citation + ' -->',
+        '示例 <code>' + ignored.citation + '</code>',
+        '[链接](https://example.test/' + ignored.citation + ')',
+        '',
+        '乙 **' + second.citation + '**，甲 ' + first.citation,
+        '重复 ' + second.citation + ' ' + previous.citation + ' ' + failed.citation + ' ' + mcp.citation,
+        '伪造 [cite:111111111111111111111111]',
+      ].join('\n');
+      assert.deepStrictEqual(collectCitations(output, steps, 'local-retrieve').map(citation => citation.chunkId),
+        ['second', 'first']);
+      assert.deepStrictEqual(collectCitations(first.citation, [], 'local-retrieve'), []);
+      assert.deepStrictEqual(collectCitations(first.citation, [{
+        ...observed, output: { hits: [{ ...first, text: 'tampered' }] },
+      }], 'local-retrieve'), []);
     });
   });
 });

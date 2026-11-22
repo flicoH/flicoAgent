@@ -105,12 +105,32 @@ export interface VectorRecord {
   id: string;
   /** 所属文档或文件唯一标识 */
   docId: string;
+  /** 索引所属来源的键。旧文件索引可从 meta.filePath 和 docId 推断。 */
+  root?: string;
   /** 分块文本原始内容 */
   text: string;
   /** 计算得到的高维向量数据 */
   embedding: number[];
   /** 自定义元数据（如文件路径、标题、分块位置等） */
   meta?: Record<string, unknown>;
+}
+
+export type IndexedChunk = Pick<VectorRecord, 'id' | 'docId' | 'text' | 'meta'>;
+
+export type KnowledgeKind = 'rag' | 'wiki';
+
+export function knowledgeKind(chunk: IndexedChunk): KnowledgeKind {
+  return chunk.meta?.kind === 'wiki' ? 'wiki' : 'rag';
+}
+
+export function wikiOwner(chunk: IndexedChunk): string | undefined {
+  const wiki = chunk.meta?.wiki as { ownerDocId?: unknown } | undefined;
+  return knowledgeKind(chunk) === 'wiki' && typeof wiki?.ownerDocId === 'string' ? wiki.ownerDocId : undefined;
+}
+
+export interface IndexedDocument {
+  docId: string;
+  chunks: number;
 }
 
 /**
@@ -150,5 +170,16 @@ export interface VectorStore {
    * @param topK 返回的最相似结果条数
    * @returns 匹配的向量结果切片列表（按 score 降序排列）
    */
-  query(embedding: number[], topK: number): Promise<VectorQueryResult[]>;
+  query(embedding: number[], topK: number, root?: string, kind?: KnowledgeKind): Promise<VectorQueryResult[]>;
+  /** 同一索引快照中的两路独立排名。 */
+  queryHybrid?(embedding: number[], topK: number, root: string): Promise<Record<KnowledgeKind, VectorQueryResult[]>>;
+
+  /** 原子替换此来源的索引，保留本次处理失败的文档。root 是绝对目录或配置来源的键。 */
+  syncDirectory?(root: string, records: VectorRecord[], retain: ReadonlySet<string>): Promise<void>;
+  /** 仅统计原文切片。删除接口同步删除该原文生成的 Wiki 章节。 */
+  documents?(root: string): Promise<IndexedDocument[]>;
+  removeDocument?(root: string, docId: string): Promise<number>;
+  loadChunk?(root: string, id: string): Promise<IndexedChunk | null>;
+  /** 获取已发布的 Wiki 章节及其依据。自定义 Wiki 后端须在 TopK 前按 kind 过滤。 */
+  wikiChunks?(root: string): Promise<IndexedChunk[]>;
 }

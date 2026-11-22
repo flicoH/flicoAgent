@@ -3,8 +3,9 @@
  *
  * 包含切片器契约、文本切片纯函数、知识库灌库与语义检索服务，以及 Nest 依赖注入模块。
  */
-export type { Chunk, RagOptions } from './rag.interface';
+export type { Chunk, RagMode, RagOptions, RagSourceDriver, RagSourceOptions } from './rag.interface';
 export type { Chunker as IChunker } from './rag.interface';
+export type { WikiSourceReference } from './wiki';
 export { chunk, resolveChunker, Chunker } from './chunker';
 export * from './retriever.service';
 export * from './rag.module';

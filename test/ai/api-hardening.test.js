@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { createHash, createHmac, randomUUID } = require('node:crypto');
-const { mkdtemp, mkdir, rm, writeFile } = require('node:fs/promises');
+const { mkdtemp, mkdir, readFile, rm, writeFile } = require('node:fs/promises');
 const { IncomingMessage, ServerResponse } = require('node:http');
 const { Duplex } = require('node:stream');
 const { tmpdir } = require('node:os');
@@ -8,6 +8,7 @@ const { join } = require('node:path');
 const { AIMessageChunk } = require('@langchain/core/messages');
 const { NestFactory } = require('@nestjs/core');
 const { AgentScannerService } = require('../../dist/ai/agent/agent-scanner.service');
+const { agentRequestSignature } = require('../../dist/ai/access/request-signature');
 const { createAgentGraph } = require('../../dist/ai/runtime/langgraph/agent.graph');
 const { LangChainPlannerService } = require('../../dist/ai/runtime/langchain/langchain-planner.service');
 const { LangGraphOrchestratorService } = require('../../dist/ai/runtime/langgraph/langgraph-orchestrator.service');
@@ -50,6 +51,7 @@ function dispatch(app, method, url, headers, body) {
 describe('AI API 权限与执行回归', () => {
   it('离线评测使用真实同步接口检查工具、引用、权限与记忆', async () => {
     const fixture = await mkdtemp(join(tmpdir(), 'flico-eval-'));
+    const docs = join(fixture, 'docs');
     const keyId = 'fixture-eval';
     const secret = 'fixture-signing-secret';
     const app = await NestFactory.create(AppModule.register({
@@ -59,7 +61,7 @@ describe('AI API 权限与执行回归', () => {
         store: {
           trace: join(fixture, 'trace'),
           memory: { path: join(fixture, 'memory') },
-          vector: { path: join(fixture, 'vector.json') },
+          vector: { path: join(fixture, 'vector.json'), fixturesPath: docs },
         },
         embedding: { use: { embed: async texts => texts.map(() => [1]) } },
         llm: { default: 'test', models: { test: { use: { async chat(messages) {
@@ -84,7 +86,6 @@ describe('AI API 权限与执行回归', () => {
     try {
       await app.init();
       app.get(AgentScannerService).get = name => ({ name, skills: [], tools: name === 'support' ? ['retrieve'] : [] });
-      const docs = join(fixture, 'docs');
       await mkdir(docs);
       await writeFile(join(docs, 'policy.md'), 'Refunds within 30 days');
       await app.get(RetrieverService).ingestFromDirectory(docs);
@@ -118,6 +119,373 @@ describe('AI API 权限与执行回归', () => {
       const trace = await app.get(TraceService).load(report.cases[0].turns[0].runId);
       assert.deepEqual(trace.citations.map(citation => citation.docId), ['policy.md']);
       assert.equal((await dispatch(app, 'POST', path, firstRequest.headers, firstRequest.raw)).status, 401);
+    } finally {
+      await app.close();
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it('RAG 管理接口校验权限、直达原文切片，并与 Agent 同步、SSE 和 Trace 共享引用', async () => {
+    const fixture = await mkdtemp(join(tmpdir(), 'flico-rag-api-'));
+    const docs = join(fixture, 'docs');
+    const docId = 'policies/refund.md';
+    const source = '  Refunds within 30 days.  \n' + 'More historical information. '.repeat(6);
+    const app = await NestFactory.create(AppModule.register({
+      ai: {
+        access: {
+          authorize: req => req.headers.cookie === 'fixture-rag-session=reader'
+            ? { scope: 'fixture-session', ragRead: true } : null,
+          keys: {
+            writer: { secret: 'fixture-writer', ingest: true },
+            reader: { secret: 'fixture-reader', ragRead: true },
+            agent: { secret: 'fixture-agent', agents: ['support'] },
+          },
+        },
+        store: {
+          trace: join(fixture, 'trace'),
+          memory: { path: join(fixture, 'memory') },
+          vector: { path: join(fixture, 'vectors.json'), fixturesPath: docs },
+        },
+        embedding: { use: { embed: async texts => texts.map(() => [1]) } },
+        rag: { chunk: { size: 64, overlap: 0 }, topK: 10 },
+        llm: { default: 'test', models: { test: { use: { async chat(messages) {
+          const last = messages.at(-1);
+          assert.match(messages[0].content, /答案|正文/);
+          if (last.role === 'tool') {
+            const { hits } = JSON.parse(last.content).output;
+            const evidence = hits.find(hit => hit.docId === docId && hit.text.includes('30 days'));
+            const unused = hits.find(hit => hit.docId === 'other.txt');
+            return { output: '可在 30 天内退款 ' + evidence.citation + '。\n示例 `' + unused.citation + '`' };
+          }
+          return { output: '', message: { role: 'assistant', content: null, tool_calls: [
+            { id: 'rag-lookup', type: 'function', function: { name: 'retrieve', arguments: '{"query":"refund"}' } },
+          ] } };
+        } } } } },
+      },
+    }), { logger: false, rawBody: true });
+
+    const rag = '/api/ai/rag';
+    async function signed(method, path, keyId, payload) {
+      const raw = payload === undefined ? '' : JSON.stringify(payload);
+      const nonce = randomUUID();
+      const time = String(Date.now());
+      const signature = agentRequestSignature('fixture-' + keyId, keyId, method, path, time, nonce, raw).toString('hex');
+      return dispatch(app, method, path, {
+        'x-agent-key-id': keyId, 'x-agent-nonce': nonce, s_t: time, s_sign: signature,
+        ...(raw ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(raw) } : {}),
+      }, raw);
+    }
+    const dataOf = response => JSON.parse(response.body).data;
+
+    try {
+      await app.init();
+      app.get(AgentScannerService).get = name => ({ name, skills: [], tools: ['retrieve'] });
+      assert.equal((await signed('POST', rag + '/rebuild', 'writer')).status, 404);
+      await mkdir(join(docs, 'policies'), { recursive: true });
+      const policyPath = join(docs, docId);
+      await writeFile(policyPath, source);
+      await writeFile(join(docs, 'other.txt'), 'Additional technical information');
+
+      assert.equal((await dispatch(app, 'GET', rag + '/documents', {}, '')).status, 401);
+      assert.equal((await signed('GET', rag + '/documents', 'agent')).status, 403);
+      assert.equal((await signed('POST', rag + '/rebuild', 'reader')).status, 403);
+      assert.equal((await signed('DELETE', rag + '/documents', 'reader', { docId })).status, 403);
+      assert.equal((await signed('POST', rag + '/preview', 'reader', { query: ' ', topK: 1 })).status, 400);
+      assert.equal((await signed('POST', rag + '/preview', 'reader', { query: 'refund', topK: '1' })).status, 400);
+      assert.equal((await signed('GET', rag + '/chunk?id=one&id=two', 'reader')).status, 400);
+      assert.equal((await signed('DELETE', rag + '/documents', 'writer', { docId: 1 })).status, 400);
+
+      const rebuilt = await signed('POST', rag + '/rebuild', 'writer');
+      assert.equal(rebuilt.status, 201);
+      assert.deepEqual(dataOf(rebuilt).succeeded, ['other.txt', docId]);
+      const listed = await signed('GET', rag + '/documents', 'reader');
+      assert.equal(listed.status, 200);
+      const documents = dataOf(listed);
+      assert.equal(documents.length, 2);
+      assert.ok(documents.find(item => item.docId === docId).chunks > 1);
+      const time = String(Date.now());
+      const sessionHeaders = {
+        cookie: 'fixture-rag-session=reader',
+        s_t: time,
+        s_sign: createHash('md5').update('klx05hb3n1c9ujp8uhxbs2ikkiowp212_' + time).digest('hex'),
+      };
+      assert.deepEqual(dataOf(await dispatch(app, 'GET', rag + '/documents', sessionHeaders, '')), documents);
+      assert.equal((await dispatch(app, 'POST', rag + '/rebuild', sessionHeaders, '')).status, 403);
+
+      const preview = await signed('POST', rag + '/preview', 'reader', { query: 'refund' });
+      assert.equal(preview.status, 201);
+      const evidence = dataOf(preview).hits.find(hit => hit.docId === docId && hit.text.includes('30 days'));
+      const byId = rag + '/chunk?id=' + encodeURIComponent(evidence.id);
+      const chunk = await signed('GET', byId, 'reader');
+      assert.equal(chunk.status, 200);
+      const located = dataOf(chunk);
+      assert.equal(located.citation, evidence.citation);
+      assert.equal(located.meta.relativePath, docId);
+      assert.equal(source.slice(located.meta.start, located.meta.end), located.text);
+      assert.equal(located.meta.filePath, undefined);
+      assert.equal(located.score, undefined);
+
+      const agent = { agent: 'support', input: 'refund' };
+      const sync = await signed('POST', '/api/ai/agent/run', 'agent', agent);
+      assert.equal(sync.status, 201);
+      const result = dataOf(sync);
+      assert.deepEqual(result.citations, [{
+        ref: evidence.citation, docId, chunkId: evidence.id, score: evidence.score,
+      }]);
+      const stream = await signed('POST', '/api/ai/agent/run/stream', 'agent', agent);
+      assert.equal(stream.status, 201);
+      const done = JSON.parse(stream.body.match(/event: done\r?\ndata: (.+)/)[1]).data;
+      assert.deepEqual(done.citations, result.citations);
+
+      await writeFile(policyPath, 'Refunds within 15 days.');
+      assert.equal((await signed('POST', rag + '/rebuild', 'writer')).status, 201);
+      assert.equal((await signed('GET', byId, 'reader')).status, 404);
+      assert.equal(dataOf(await signed('GET', rag + '/documents', 'reader')).find(item => item.docId === docId).chunks, 1);
+      const trace = dataOf(await signed('GET', '/api/ai/trace/' + result.runId, 'agent'));
+      assert.deepEqual(trace.citations, result.citations);
+      const observed = trace.steps.find(step => step.type === 'tool' && step.name === 'retrieve');
+      assert.equal(observed.output.hits.find(hit => hit.id === evidence.id).text, located.text);
+
+      const deleted = await signed('DELETE', rag + '/documents', 'writer', { docId });
+      assert.equal(deleted.status, 200);
+      assert.deepEqual(dataOf(deleted), { docId, removed: 1 });
+      assert.equal(await readFile(policyPath, 'utf8'), 'Refunds within 15 days.');
+      assert.equal((await signed('DELETE', rag + '/documents', 'writer', { docId })).status, 404);
+      await signed('POST', rag + '/rebuild', 'writer');
+      assert.ok(dataOf(await signed('GET', rag + '/documents', 'reader')).some(item => item.docId === docId));
+    } finally {
+      await app.close();
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it('Wiki 管理、预览和 Agent 共用已发布索引，Trace 保留换版前的原文依据', async () => {
+    const fixture = await mkdtemp(join(tmpdir(), 'flico-wiki-api-'));
+    const docs = join(fixture, 'docs');
+    const file = join(docs, 'policy.md');
+    const rag = '/api/ai/rag';
+    const app = await NestFactory.create(AppModule.register({
+      ai: {
+        access: { keys: {
+          operator: { secret: 'fixture-operator', ingest: true },
+          agent: { secret: 'fixture-agent', agents: ['support'] },
+        } },
+        store: {
+          trace: join(fixture, 'trace'),
+          memory: { path: join(fixture, 'memory') },
+          vector: { path: join(fixture, 'vectors.json'), fixturesPath: docs },
+        },
+        rag: { mode: 'hybrid', topK: 2, wiki: { model: 'compiler' } },
+        embedding: { use: { embed: async texts => texts.map(() => [1]) } },
+        llm: { default: 'answer', models: {
+          compiler: { use: { async chat(messages) {
+            const [source] = JSON.parse(messages.at(-1).content).chunks;
+            return { output: JSON.stringify({ sections: [{
+              pageId: 'refunds', title: '退款', heading: '处理时限',
+              markdown: '摘要 ' + source.text, chunkIds: [source.id],
+            }] }) };
+          } } },
+          answer: { use: { async chat(messages) {
+            const last = messages.at(-1);
+            if (last.role === 'tool') {
+              const { hits } = JSON.parse(last.content).output;
+              const wiki = hits.find(hit => hit.meta.kind === 'wiki');
+              return { output: '根据退款规则 ' + wiki.citation };
+            }
+            return { output: '', message: { role: 'assistant', content: null, tool_calls: [
+              { id: 'lookup', type: 'function', function: { name: 'retrieve', arguments: '{"query":"退款"}' } },
+            ] } };
+          } } },
+        } },
+      },
+    }), { logger: false, rawBody: true });
+
+    function signed(method, path, keyId, payload) {
+      const raw = payload === undefined ? '' : JSON.stringify(payload);
+      const nonce = randomUUID();
+      const time = String(Date.now());
+      const signature = agentRequestSignature('fixture-' + keyId, keyId, method, path, time, nonce, raw).toString('hex');
+      return dispatch(app, method, path, {
+        'x-agent-key-id': keyId, 'x-agent-nonce': nonce, s_t: time, s_sign: signature,
+        ...(raw ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(raw) } : {}),
+      }, raw);
+    }
+    const data = response => JSON.parse(response.body).data;
+
+    try {
+      await app.init();
+      app.get(AgentScannerService).get = name => ({ name, skills: [], tools: ['retrieve'] });
+      await mkdir(docs);
+      await writeFile(file, '退款时限为三十天。');
+      assert.equal((await signed('GET', rag + '/wiki/pages', 'agent')).status, 403);
+      const built = await signed('POST', rag + '/rebuild', 'operator');
+      assert.equal(built.status, 201);
+      assert.deepEqual(data(built).wiki, { pages: 1, sections: 1, generatedSections: 1 });
+      assert.deepEqual(data(await signed('GET', rag + '/wiki/pages', 'operator')), [
+        { id: 'refunds', title: '退款', sections: 1 },
+      ]);
+      const fullPage = await signed('GET', rag + '/wiki/page?id=refunds', 'operator');
+      assert.equal(fullPage.status, 200);
+      assert.match(data(fullPage).markdown, /三十天/);
+
+      const preview = data(await signed('POST', rag + '/preview', 'operator', { query: '退款' }));
+      const wiki = preview.hits.find(hit => hit.meta.kind === 'wiki');
+      assert.equal(wiki.id, data(fullPage).sections[0].chunkId);
+      assert.equal(preview.hits.length, 2);
+      const run = await signed('POST', '/api/ai/agent/run', 'agent', { agent: 'support', input: '退款？' });
+      assert.equal(run.status, 201);
+      const result = data(run);
+      assert.deepEqual(result.citations, [{
+        ref: wiki.citation, docId: wiki.docId, chunkId: wiki.id, score: wiki.score,
+        kind: 'wiki', pageId: 'refunds',
+      }]);
+      assert.equal(data(await signed('GET', rag + '/chunk?id=' + wiki.id, 'operator')).meta.wiki.sources[0].text,
+        '退款时限为三十天。');
+
+      await writeFile(file, '退款时限为十五天。');
+      assert.equal((await signed('POST', rag + '/rebuild', 'operator')).status, 201);
+      assert.equal((await signed('GET', rag + '/chunk?id=' + wiki.id, 'operator')).status, 404);
+      const trace = data(await signed('GET', '/api/ai/trace/' + result.runId, 'agent'));
+      const historical = trace.steps.find(step => step.type === 'tool').output.hits.find(hit => hit.id === wiki.id);
+      assert.equal(historical.meta.wiki.sources[0].text, '退款时限为三十天。');
+      assert.deepEqual(trace.citations, result.citations);
+    } finally {
+      await app.close();
+      await rm(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it('Wiki 模式预览与 Agent 一致引用并回溯原文，删索引后重建恢复，默认使用 ai.llm.default', async () => {
+    const fixture = await mkdtemp(join(tmpdir(), 'flico-wiki-mode-api-'));
+    const docs = join(fixture, 'docs');
+    const rag = '/api/ai/rag';
+    const app = await NestFactory.create(AppModule.register({
+      ai: {
+        access: { keys: {
+          operator: { secret: 'fixture-operator', ingest: true },
+          agent: { secret: 'fixture-agent', agents: ['support'] },
+        } },
+        store: {
+          trace: join(fixture, 'trace'),
+          memory: { path: join(fixture, 'memory') },
+          vector: { path: join(fixture, 'vectors.json'), fixturesPath: docs },
+        },
+        rag: { mode: 'wiki', topK: 2 },
+        embedding: { use: { embed: async texts => texts.map(() => [1, 0]) } },
+        llm: { default: 'defaultModel', models: { defaultModel: { use: { async chat(messages) {
+          const last = messages.at(-1);
+          if (last.role === 'tool') {
+            const { hits } = JSON.parse(last.content).output;
+            const cited = hits[0];
+            const unused = hits[1];
+            return { output: '仅引用第一条 ' + cited.citation + '，忽略示例 `' + unused.citation + '`' };
+          }
+          if (messages[0].role === 'system' && messages[0].content.includes('compile a durable Markdown knowledge wiki')) {
+            const [source] = JSON.parse(last.content).chunks;
+            const isAppeal = source.docId === 'appeal.md';
+            return { output: JSON.stringify({ sections: [{
+              pageId: isAppeal ? 'appeals' : 'refunds',
+              title: isAppeal ? '复核流程' : '退款规则',
+              heading: source.docId,
+              markdown: '编译段落：' + source.text,
+              chunkIds: [source.id],
+              links: isAppeal ? ['refunds'] : ['appeals'],
+            }] }) };
+          }
+          return { output: '', message: { role: 'assistant', content: null, tool_calls: [
+            { id: 'lookup', type: 'function', function: { name: 'retrieve', arguments: '{"query":"退款"}' } },
+          ] } };
+        } } } } },
+      },
+    }), { logger: false, rawBody: true });
+
+    function signed(method, path, keyId, payload) {
+      const raw = payload === undefined ? '' : JSON.stringify(payload);
+      const nonce = randomUUID();
+      const time = String(Date.now());
+      const signature = agentRequestSignature('fixture-' + keyId, keyId, method, path, time, nonce, raw).toString('hex');
+      return dispatch(app, method, path, {
+        'x-agent-key-id': keyId, 'x-agent-nonce': nonce, s_t: time, s_sign: signature,
+        ...(raw ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(raw) } : {}),
+      }, raw);
+    }
+    const data = response => JSON.parse(response.body).data;
+
+    try {
+      await app.init();
+      app.get(AgentScannerService).get = name => ({ name, skills: [], tools: ['retrieve'] });
+      await mkdir(docs);
+      await writeFile(join(docs, 'policy.md'), '退款有效期为三十天。');
+      await writeFile(join(docs, 'appeal.md'), '超时退款可申请人工复核。');
+
+      const built = await signed('POST', rag + '/rebuild', 'operator');
+      assert.equal(built.status, 201);
+      assert.deepEqual(data(built).wiki, { pages: 2, sections: 2, generatedSections: 2 });
+
+      // 预览与 Agent 同步/流式在 wiki 模式下命中同一版本证据，且多条命中只收录正文实际引用的一条
+      const preview = data(await signed('POST', rag + '/preview', 'operator', { query: '退款' }));
+      assert.equal(preview.hits.length, 2);
+      assert.ok(preview.hits.every(hit => hit.meta.kind === 'wiki'));
+
+      const sync = data(await signed('POST', '/api/ai/agent/run', 'agent', { agent: 'support', input: '退款' }));
+      const streamed = await signed('POST', '/api/ai/agent/run/stream', 'agent', { agent: 'support', input: '退款' });
+      const done = JSON.parse(streamed.body.match(/event: done\r?\ndata: (.+)/)[1]).data;
+      assert.deepEqual(sync.citations, [{
+        ref: preview.hits[0].citation,
+        docId: preview.hits[0].docId,
+        chunkId: preview.hits[0].id,
+        score: preview.hits[0].score,
+        kind: 'wiki',
+        pageId: preview.hits[0].meta.wiki.pageId,
+      }]);
+      assert.deepEqual(done.citations, sync.citations);
+
+      // 定位 Wiki 切片并进一步回溯到原文切片
+      const locatedWiki = data(await signed('GET', rag + '/chunk?id=' + encodeURIComponent(sync.citations[0].chunkId), 'operator'));
+      assert.equal(locatedWiki.meta.version, preview.hits[0].meta.version);
+      const [sourceRef] = locatedWiki.meta.wiki.sources;
+      const locatedRaw = data(await signed('GET', rag + '/chunk?id=' + encodeURIComponent(sourceRef.chunkId), 'operator'));
+      assert.equal(locatedRaw.meta.version, sourceRef.version);
+      assert.equal(locatedRaw.text, sourceRef.text);
+
+      // 删除某文档索引使对应 Wiki 页面和切片退场；重建后由于源文件仍在而恢复
+      const deletedDocId = sourceRef.docId;
+      assert.equal((await signed('DELETE', rag + '/documents', 'operator', { docId: deletedDocId })).status, 200);
+      assert.equal((await signed('GET', rag + '/chunk?id=' + encodeURIComponent(sync.citations[0].chunkId), 'operator')).status, 404);
+      assert.equal((await signed('GET', rag + '/chunk?id=' + encodeURIComponent(sourceRef.chunkId), 'operator')).status, 404);
+      const trace = data(await signed('GET', '/api/ai/trace/' + sync.runId, 'agent'));
+      assert.deepEqual(trace.citations, sync.citations);
+      assert.equal(trace.steps.find(step => step.type === 'tool').output.hits[0].meta.wiki.sources[0].text, sourceRef.text);
+
+      const rebuilt = await signed('POST', rag + '/rebuild', 'operator');
+      assert.equal(rebuilt.status, 201);
+      assert.equal(data(rebuilt).wiki.generatedSections, 1);
+      assert.equal((await signed('GET', rag + '/wiki/pages', 'operator')).status, 200);
+      assert.equal(data(await signed('GET', rag + '/wiki/pages', 'operator')).length, 2);
+
+      // GET /api/ai/agent/config 返回脱敏后的完整 AI/RAG/Wiki 运行配置，不泄漏密钥与本地路径
+      const time = String(Date.now());
+      const legacySign = createHash('md5').update('klx05hb3n1c9ujp8uhxbs2ikkiowp212_' + time).digest('hex');
+      const configRes = await dispatch(app, 'GET', '/api/ai/agent/config', { s_t: time, s_sign: legacySign }, '');
+      assert.equal(configRes.status, 200);
+      const publicConfig = JSON.parse(configRes.body);
+      assert.equal(publicConfig.threadEnabled, true);
+      assert.equal(publicConfig.maxIterations, 5);
+      assert.deepEqual(publicConfig.memory, { maxTurns: 20 });
+      assert.deepEqual(publicConfig.llm, { default: 'defaultModel', models: ['defaultModel'] });
+      assert.deepEqual(publicConfig.embedding, { default: null, models: [] });
+      assert.deepEqual(publicConfig.rag, {
+        mode: 'wiki',
+        topK: 2,
+        chunk: { size: 500, overlap: 50 },
+        tool: { name: 'retrieve', description: '从私有知识库检索片段。使用片段时，在答案正文原样插入该片段的 citation 标记。' },
+        wiki: { model: 'defaultModel' },
+        source: { driver: 'file' },
+        vector: { driver: 'file' },
+      });
+      assert.deepEqual(publicConfig.mcp, { enabled: false, servers: [] });
+      assert.deepEqual(publicConfig.guardrail, { enabled: false });
+      assert.doesNotMatch(configRes.body, /fixture-operator|fixture-agent|vectors\.json|flico-wiki-mode-api-/);
     } finally {
       await app.close();
       await rm(fixture, { recursive: true, force: true });

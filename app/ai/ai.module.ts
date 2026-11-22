@@ -4,6 +4,7 @@ import { AiController } from './ai.controller';
 import { GuardrailModule } from './guardrail/guardrail.module';
 import { McpModule } from './mcp/mcp.module';
 import { MemoryModule } from './memory/memory.module';
+import { RagController } from './rag/rag.controller';
 import { RagModule } from './rag/rag.module';
 import { RuntimeModule } from './runtime/runtime.module';
 import { SkillModule } from './skill/skill.module';
@@ -27,7 +28,7 @@ import { ToolModule } from './tool/tool.module';
  *    - RagModule: 知识库检索增强生成相关
  *    - MemoryModule: 上下文记忆与 Checkpoint 状态管理
  * 4. 挂载控制器：
- *    - AiController: 对外暴露 `/api/ai/*` 相关 RESTful 及 SSE 流式端点
+ *    - AiController 和 RagController: 暴露 `/api/ai/*` REST 与 SSE 端点
  */
 @Module({
   imports: [
@@ -50,6 +51,6 @@ import { ToolModule } from './tool/tool.module';
     // 注入安全护栏守卫模块
     GuardrailModule,
   ],
-  controllers: [AiController],
+  controllers: [AiController, RagController],
 })
 export class AiModule {}

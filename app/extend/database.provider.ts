@@ -1,9 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import knex from 'knex';
 import { ConfigService } from '../config/config.service';
 
 @Injectable()
-export class DatabaseProvider {
+export class DatabaseProvider implements OnModuleDestroy {
   readonly knex?: knex;
 
   constructor(config: ConfigService) {
@@ -11,5 +11,9 @@ export class DatabaseProvider {
     if (db) {
       this.knex = knex(db);
     }
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.knex?.destroy();
   }
 }

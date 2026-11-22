@@ -21,7 +21,8 @@ interface AiConfig {
 /**
  * 框架内置默认 RAG 配置项
  */
-export const DEFAULT_RAG_OPTIONS: Required<Omit<RagOptions, 'chunker'>> = {
+export const DEFAULT_RAG_OPTIONS = {
+  mode: 'rag',
   chunk: {
     size: 500,
     overlap: 50,
@@ -29,9 +30,9 @@ export const DEFAULT_RAG_OPTIONS: Required<Omit<RagOptions, 'chunker'>> = {
   topK: 3,
   tool: {
     name: 'retrieve',
-    description: '从私有知识库检索相关片段；回答必须引用返回的 docId/text',
+    description: '从私有知识库检索片段。使用片段时，在答案正文原样插入该片段的 citation 标记。',
   },
-};
+} satisfies Required<Omit<RagOptions, 'chunker' | 'wiki' | 'source' | 'fixtures'>>;
 
 /**
  * 解析待灌库的本地知识库知识目录绝对路径
@@ -71,14 +72,31 @@ export function resolveRagFixturesPath(config: ConfigService): string {
  * @param config 全局配置服务
  * @returns 合并后的完备 RagOptions
  */
+export interface ResolvedRagOptions {
+  mode: 'rag' | 'wiki' | 'hybrid';
+  wiki?: RagOptions['wiki'];
+  source?: RagOptions['source'];
+  fixtures?: RagOptions['fixtures'];
+  chunk: { size: number; overlap: number };
+  topK: number;
+  tool: { name: string; description: string };
+  chunker?: RagOptions['chunker'];
+}
+
 export function resolveRagOptions(
   config: ConfigService,
-): Required<Omit<RagOptions, 'chunker'>> & { chunker?: RagOptions['chunker'] } {
+): ResolvedRagOptions {
   const raw = config.get<AiConfig>('ai')?.rag
     ?? config.get<RagOptions>('ai.rag')
     ?? {};
 
+  const mode = raw.mode ?? DEFAULT_RAG_OPTIONS.mode;
+  if (mode !== 'rag' && mode !== 'wiki' && mode !== 'hybrid') throw new Error('Invalid ai.rag.mode');
   return {
+    mode,
+    wiki: raw.wiki,
+    source: raw.source,
+    fixtures: raw.fixtures,
     chunk: {
       size: raw.chunk?.size ?? DEFAULT_RAG_OPTIONS.chunk.size,
       overlap: raw.chunk?.overlap ?? DEFAULT_RAG_OPTIONS.chunk.overlap,

@@ -1,6 +1,11 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type Knex from 'knex';
 import { ConfigService } from '../../../config/config.service';
+import { FileVectorStore } from '../reference/file-vector.store';
+import { MysqlVectorStore } from '../reference/mysql-vector.store';
+import { QdrantVectorStore } from '../reference/qdrant-vector.store';
+import type { VectorStore } from '../store.interface';
 
 /**
  * AI Store 相关配置接口
@@ -72,4 +77,47 @@ export function resolveVectorStorePath(config: ConfigService): string {
   }
 
   return resolve(process.cwd(), 'data/vector.json');
+}
+
+export function requireMysqlConnection(connection: Knex | undefined, option: string): Knex {
+  if (connection?.client.dialect !== 'mysql') {
+    throw new Error(`${option} requires a MySQL connection configured in db`);
+  }
+  return connection;
+}
+
+interface VectorStoreOptions {
+  driver?: 'file' | 'mysql' | 'qdrant';
+  namespace?: string;
+  url?: string;
+  apiKey?: string;
+  dimensions?: number;
+  use?: VectorStore | ((config: ConfigService) => VectorStore | Promise<VectorStore>);
+}
+
+export async function resolveVectorStore(config: ConfigService, connection?: Knex): Promise<VectorStore> {
+  const options = config.get<AiStoreConfig>('ai')?.store?.vector ?? config.get('ai.store.vector');
+  const settings = typeof options === 'object' && options !== null ? options as VectorStoreOptions : undefined;
+  if (settings?.use !== undefined) {
+    const store = typeof settings.use === 'function' ? await settings.use(config) : settings.use;
+    if (typeof store?.upsert !== 'function' || typeof store?.query !== 'function') {
+      throw new Error('ai.store.vector.use must provide a VectorStore');
+    }
+    return store;
+  }
+  if (!settings?.driver || settings.driver === 'file') return new FileVectorStore(resolveVectorStorePath(config));
+  const namespace = settings.namespace ?? 'default';
+  if (typeof namespace !== 'string' || !/^[a-zA-Z0-9_.-]{1,128}$/.test(namespace)) {
+    throw new Error('Invalid ai.store.vector.namespace');
+  }
+  if (settings.driver === 'mysql') {
+    return new MysqlVectorStore(requireMysqlConnection(connection, 'ai.store.vector'), namespace);
+  }
+  if (settings.driver === 'qdrant') {
+    if (typeof settings.url !== 'string' || typeof settings.dimensions !== 'number') {
+      throw new Error('ai.store.vector requires a Qdrant URL and vector dimensions');
+    }
+    return new QdrantVectorStore(settings.url, namespace, settings.dimensions, settings.apiKey);
+  }
+  throw new Error('Unsupported ai.store.vector.driver');
 }
