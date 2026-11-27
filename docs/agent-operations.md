@@ -238,3 +238,62 @@ module.exports = {
 
 - 监听端口按以下优先级解析：`serverStart({ port })` > 配置文件 `port` > 环境变量 `PORT` > 默认 `8080`；同时支持可选 `host`。
 - `bootstrap()` 默认启用 Nest 优雅停机钩子（`enableShutdownHooks()`），收到 `SIGTERM`/`SIGINT` 时自动关闭 MCP 子进程并释放数据库连接池。如需自定义停机流程，可传入 `shutdownHooks: false`。
+
+## LLM 推理参数、主备 Fallback 与熔断
+
+### 参数优先级与可配置项
+
+推理参数支持在 **全局 `ai.llm`**、**单模型 `ai.llm.models.<key>`** 与 **Agent 声明（`*.agent.ts`）** 三层配置，按 **Agent 声明 > 单模型配置 > 全局 `ai.llm` > 框架默认值** 合并生效：
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `temperature` | 采样温度（非负实数） | `0` |
+| `maxTokens` | 单次生成最大输出 token 数（正整数） | 缺省（由上游决定） |
+| `topP` | 核采样概率阈值 `(0, 1]` | 缺省 |
+| `timeoutMs`（别名 `timeout`） | 单次模型调用超时毫秒数（正整数），同时作用于 OpenAI 兼容模型与自定义 `use` Provider | 缺省 |
+| `maxRetries` | 单模型 SDK 内部最大重试次数 | 无 `fallbacks` 时为 `2`；配置了 `fallbacks` 时为 `0`（快速切备） |
+
+### 主备模型链与熔断配置示例
+
+```js
+module.exports = {
+  ai: {
+    llm: {
+      default: 'qwen',
+      temperature: 0.2,
+      maxTokens: 2048,
+      timeoutMs: 30_000,
+      fallbacks: ['deepseek', 'kimi'],
+      circuitBreaker: {
+        enabled: true,
+        failureThreshold: 3,   // 连续 3 次可重试故障触发熔断（open）
+        cooldownMs: 30_000,    // 冷却 30 秒后进入半开（half_open）探测
+        halfOpenMaxCalls: 1,   // 半开态最多放行 1 个并发探测请求
+      },
+      models: {
+        qwen: {
+          provider: 'openai-compatible',
+          apiKey: process.env.QWEN_API_KEY,
+          model: 'qwen-plus',
+          fallbacks: ['deepseek'], // 模型级优先于全局 fallbacks，框架自动去重
+        },
+        deepseek: {
+          provider: 'openai-compatible',
+          apiKey: process.env.DEEPSEEK_API_KEY,
+          model: 'deepseek-chat',
+          timeoutMs: 25_000,
+        },
+        kimi: {
+          provider: 'openai-compatible',
+          apiKey: process.env.KIMI_API_KEY,
+          model: 'kimi-k2.6',
+        },
+      },
+    },
+  },
+};
+```
+
+- **切备触发条件**：仅针对瞬态故障（HTTP `429`、HTTP `5xx`、HTTP `408`/超时、网络断连以及 `circuit_open`）自动切换至下一个备用模型；调用方取消（`AbortSignal`）和非瞬态 `4xx`（如 `400`/`401`/`403`/`422`）直接返回错误，不切备也不计入熔断。
+- **流式一致性**：`POST /api/ai/agent/run/stream` 与 `POST /api/ai/chat/stream` 在主模型流式输出中途失败切备前，会自动发送 `delta_reset` SSE 事件通知前端清空临时半截文本，再推送备模型的完整输出。
+- **Trace 切换记录**：每次发生切备或因熔断跳过主模型时，Trace 中会持久化一条脱敏的 `type: "fallback"` 步骤（含 `name: "<from>-><to>"`、`model`、`output: { fromModel, toModel, reason, statusCode?, circuitState?, attempt }` 与安全 `error`），同时在后续成功的 `plan` 步骤上标注实际执行的 `model` 字段。未发生切换时不产生额外步骤。

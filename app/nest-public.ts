@@ -32,6 +32,8 @@ export type {
 export type {
   BootstrapOptions,
   AiOptions,
+  LlmGenerationOptions,
+  LlmCircuitBreakerOptions,
   LlmOptions,
   LlmModelOptions,
   EmbeddingOptions,
@@ -56,5 +58,7 @@ export { MysqlTraceStore } from './ai/store/reference/mysql-trace.store';
 export { MysqlMemoryStore } from './ai/store/reference/mysql-memory.store';
 export { RedisTraceStore, RedisMemoryStore } from './ai/store/reference/redis-store';
 export { CapabilityApprovalRequired, CapabilityInputInvalid } from './ai/tool/executor.service';
+export type { LlmCircuitSnapshot } from './ai/runtime/internal/llm-circuit-breaker';
+export { LlmCircuitBreakerService, LlmCircuitOpenError } from './ai/runtime/internal/llm-circuit-breaker';
 export { RagModule } from './ai/rag/rag.module';
 export { RetrieverService } from './ai/rag/retriever.service';

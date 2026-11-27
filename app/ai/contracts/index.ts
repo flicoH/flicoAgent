@@ -68,8 +68,45 @@ export interface ExecutionResult {
  * - 'observe': 模型对执行结果的观察事实
  * - 'final': 最终输出步骤
  * - 'guardrail': 安全护栏拦截步骤
+ * - 'approval': 人工审批决策步骤
+ * - 'fallback': 主备模型切换或熔断跳过事件步骤
  */
-export type StepType = 'plan' | 'skill' | 'tool' | 'observe' | 'final' | 'guardrail' | 'approval';
+export type StepType = 'plan' | 'skill' | 'tool' | 'observe' | 'final' | 'guardrail' | 'approval' | 'fallback';
+
+/**
+ * 触发模型切换（Fallback）的脱敏原因分类
+ */
+export type LlmFallbackReason =
+  | 'rate_limit'
+  | 'server_error'
+  | 'timeout'
+  | 'network_error'
+  | 'circuit_open';
+
+/**
+ * 模型熔断器状态
+ */
+export type LlmCircuitState = 'closed' | 'open' | 'half_open';
+
+/**
+ * 模型切换事件载荷（脱敏，可直接持久化至 Trace）
+ */
+export interface LlmFallbackEvent {
+  /** 失败或被熔断跳过的源模型注册名 */
+  fromModel: string;
+  /** 切换到的目标备用模型注册名 */
+  toModel: string;
+  /** 触发切换的原因分类 */
+  reason: LlmFallbackReason;
+  /** 结构化错误码（如 LLM_RATE_LIMITED / LLM_SERVER_ERROR / LLM_TIMEOUT / LLM_NETWORK_ERROR / LLM_CIRCUIT_OPEN） */
+  code: string;
+  /** 可选 HTTP 状态码（如 429 / 503） */
+  statusCode?: number;
+  /** 触发时源模型的熔断器状态 */
+  circuitState?: LlmCircuitState;
+  /** 当前候选链中的第几次尝试（从 1 开始） */
+  attempt: number;
+}
 
 export type RunStatus =
   | 'queued'
@@ -162,6 +199,8 @@ export interface Step {
   usage?: TokenUsage | null;
   /** 本轮模型规划调用耗时（毫秒） */
   modelDurationMs?: number;
+  /** 本步骤实际执行成功的模型注册名（或 fallback 切换后的目标模型名） */
+  model?: string;
   /** 步骤类型 */
   type: StepType;
   /** 所在循环轮次（从 1 开始递增） */
@@ -345,6 +384,14 @@ export interface LlmChatOptions {
   stream?: boolean;
   /** 用于取消上游模型请求的中止信号 */
   signal?: AbortSignal;
+  /** 采样温度覆盖 */
+  temperature?: number;
+  /** 单次最大输出 token 数覆盖 */
+  maxTokens?: number;
+  /** 核采样概率阈值覆盖 */
+  topP?: number;
+  /** 单次调用超时时间（毫秒） */
+  timeoutMs?: number;
 }
 
 /**
@@ -393,6 +440,13 @@ export interface AgentConfigResponse {
   llm: {
     default: string | null;
     models: string[];
+    fallbacks?: string[];
+    circuitBreaker?: {
+      enabled: boolean;
+      failureThreshold: number;
+      cooldownMs: number;
+      halfOpenMaxCalls: number;
+    };
   };
   embedding: {
     default: string | null;

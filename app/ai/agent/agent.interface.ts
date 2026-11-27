@@ -59,6 +59,27 @@ export interface AgentDefinition {
    */
   model?: string;
 
+  /**
+   * 当前 Agent 优先使用的备用模型注册名链（按顺序切备）
+   * 在主模型发生 429/5xx/超时/网络故障或熔断时优先于模型/全局 fallbacks 生效
+   */
+  fallbacks?: string[];
+
+  /** 覆盖模型采样温度 */
+  temperature?: number;
+
+  /** 覆盖单次生成最大输出 token 数 */
+  maxTokens?: number;
+
+  /** 覆盖核采样概率阈值 (0, 1] */
+  topP?: number;
+
+  /** 覆盖单次模型调用超时时间（毫秒） */
+  timeoutMs?: number;
+
+  /** timeoutMs 的别名 */
+  timeout?: number;
+
   /** 当前 Agent 可直接委派的 Agent 注册名。 */
   delegates?: string[];
 

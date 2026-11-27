@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { ChatOpenAI } from '@langchain/openai';
 import {
   AIMessage,
@@ -9,14 +9,27 @@ import {
   ToolMessage,
 } from '@langchain/core/messages';
 import type { StructuredTool } from '@langchain/core/tools';
+import type { LlmGenerationOptions } from '../../../config/bootstrap-options';
 import { ConfigService } from '../../../config/config.service';
 import type {
   LlmAssistantMessage,
+  LlmChatResult,
+  LlmFallbackEvent,
   LlmMessage,
   LlmProvider,
   TokenUsage,
 } from '../../contracts';
-import { resolveLlm } from '../internal/load-llm-config';
+import {
+  classifyLlmError,
+  LlmCircuitBreakerService,
+  LlmCircuitOpenError,
+} from '../internal/llm-circuit-breaker';
+import {
+  resolveCircuitBreakerConfig,
+  resolveLlm,
+  resolveLlmCandidates,
+  type ResolvedLlm,
+} from '../internal/load-llm-config';
 
 /**
  * LangChain 规划器解析出的单个工具调用项
@@ -42,13 +55,32 @@ export interface LangChainPlanResult {
   finalAnswer?: string;
   /** 模型原装助手机器人回复实体（原样回填对话上下文） */
   response?: LlmAssistantMessage;
+  /** 实际执行成功的模型注册名 */
+  model?: string;
+  /** 本次规划期间发生的模型切换事件（无切换时缺省） */
+  fallbacks?: LlmFallbackEvent[];
   /** 明确标识由 LangChain 规划器驱动 */
   planner: 'langchain';
 }
 
-export interface LangChainPlanOptions {
+export interface LangChainPlanOptions extends LlmGenerationOptions {
   model?: string;
+  fallbacks?: string[];
   signal?: AbortSignal;
+  onDelta?: (content: string) => void | Promise<void>;
+  resetDelta?: () => void | Promise<void>;
+  onFallback?: (event: LlmFallbackEvent) => void | Promise<void>;
+}
+
+export interface ResilientChatOptions extends LlmGenerationOptions {
+  model?: string;
+  fallbacks?: string[];
+  tools?: unknown[];
+  signal?: AbortSignal;
+  onFallback?: (event: LlmFallbackEvent) => void | Promise<void>;
+}
+
+export interface ResilientChatStreamOptions extends ResilientChatOptions {
   onDelta?: (content: string) => void | Promise<void>;
   resetDelta?: () => void | Promise<void>;
 }
@@ -58,12 +90,13 @@ export interface LangChainPlanOptions {
  *
  * @param messages 当前完整的多轮消息历史
  * @param tools 开放调用的 StructuredTool 列表
- * @param options 可选配置（模型覆盖、AbortSignal、流式 delta 与 resetDelta 回调）
+ * @param options 可选配置（模型覆盖、推理参数、备模型、AbortSignal、流式 delta 与 fallback 回调）
  * @returns LangChainPlanResult（包含 toolCalls 或 finalAnswer，以及 planner='langchain'）
  */
 export interface LangChainPlanResultWithStream extends LangChainPlanResult {
   streamed?: boolean;
 }
+
 interface JsonPlan {
   /** 动作标识：'call' | 'invoke' | 'tool' | 'skill' | 'final' */
   action?: string;
@@ -73,6 +106,19 @@ interface JsonPlan {
   input?: unknown;
   /** 最终回答文本 */
   response?: string;
+}
+
+interface ResilienceRunOptions extends LlmGenerationOptions {
+  model?: string;
+  fallbacks?: string[];
+  signal?: AbortSignal;
+  resetDelta?: () => void | Promise<void>;
+  onFallback?: (event: LlmFallbackEvent) => void | Promise<void>;
+}
+
+interface AttemptCallbacks {
+  markDeltaEmitted: () => void;
+  markDeltaReset: () => void;
 }
 
 /**
@@ -167,6 +213,12 @@ export function toLangChainMessages(messages: (LlmMessage | BaseMessage)[]): Bas
   });
 }
 
+function createAbortError(message: string): Error {
+  const err = new Error(message);
+  err.name = 'AbortError';
+  return err;
+}
+
 /**
  * 基于 LangChain 的规划器服务 (LangChainPlannerService)
  *
@@ -174,17 +226,31 @@ export function toLangChainMessages(messages: (LlmMessage | BaseMessage)[]): Bas
  * 在 LangGraph 编排循环中担任核心推理大脑：
  * 1. 采用 LangChain ChatOpenAI + `bindTools` 机制将白名单内的工具注入大模型调用上下文；
  * 2. 规划决策单轮原子输出：要么产出 `toolCalls`，要么给出 `finalAnswer`；
- * 3. 在规划步骤中明确注入 `planner: 'langchain'` 标识；
- * 4. 通过 use 配置的 Provider 直接使用框架对话协议。
+ * 3. 支持推理参数配置、主备模型链式 Fallback、单次调用超时守卫与三态熔断保护；
+ * 4. 在规划步骤中明确注入 `planner: 'langchain'` 标识；
+ * 5. 通过 use 配置的 Provider 直接使用框架对话协议。
  */
 @Injectable()
 export class LangChainPlannerService {
+  private readonly circuitBreaker: LlmCircuitBreakerService;
+
   /**
-   * 构造函数注入全局配置服务
+   * 构造函数注入全局配置服务与可选熔断器服务
    *
    * @param config 全局统一配置服务
+   * @param circuitBreaker 可选模型熔断器服务（单测独立实例化时缺省自动创建本地实例）
    */
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @Optional() circuitBreaker?: LlmCircuitBreakerService,
+  ) {
+    this.circuitBreaker = circuitBreaker ?? new LlmCircuitBreakerService();
+  }
+
+  /** 获取关联的熔断器服务实例 */
+  getCircuitBreaker(): LlmCircuitBreakerService {
+    return this.circuitBreaker;
+  }
 
   /**
    * 动态根据模型配置创建 LangChain ChatOpenAI 实例
@@ -215,27 +281,327 @@ export class LangChainPlannerService {
   }
 
   /**
-   * 执行单轮决策规划
-   *
-   * @param messages 当前完整的多轮消息历史
-   * @param tools 开放调用的 StructuredTool 列表
-   * @param options 可选配置（如覆盖模型名称）
-   * @returns LangChainPlanResult（包含 toolCalls 或 finalAnswer，以及 planner='langchain'）
+   * 执行单轮决策规划（内置主备模型 Fallback、单次超时守卫与熔断保护）
    */
   async plan(
     messages: LlmMessage[],
     tools: StructuredTool[],
     options: LangChainPlanOptions = {},
   ): Promise<LangChainPlanResult> {
+    const { value, modelKey, fallbacks } = await this.executeWithResilience(
+      options,
+      async (resolved, attemptSignal, callbacks) => {
+        if (resolved.kind === 'custom') {
+          return this.planWithProvider(resolved, messages, tools, attemptSignal);
+        }
+        return this.planWithLangChain(resolved, messages, tools, options, attemptSignal, callbacks);
+      },
+    );
+
+    return {
+      ...value,
+      model: modelKey,
+      ...(fallbacks.length ? { fallbacks } : {}),
+    };
+  }
+
+  /**
+   * 弹性纯对话调用（供 POST /api/ai/chat 复用同一套参数、超时、Fallback 与熔断能力）
+   */
+  async chat(
+    messages: LlmMessage[],
+    options: ResilientChatOptions = {},
+  ): Promise<LlmChatResult> {
+    const { value } = await this.executeWithResilience(
+      options,
+      async (resolved, attemptSignal) => {
+        if (resolved.kind === 'custom') {
+          const result = await resolved.provider.chat(messages, {
+            model: resolved.modelKey,
+            tools: options.tools,
+            signal: attemptSignal,
+            temperature: resolved.params.temperature,
+            ...(resolved.params.maxTokens !== undefined ? { maxTokens: resolved.params.maxTokens } : {}),
+            ...(resolved.params.topP !== undefined ? { topP: resolved.params.topP } : {}),
+            ...(resolved.params.timeoutMs !== undefined ? { timeoutMs: resolved.params.timeoutMs } : {}),
+          });
+          if (Symbol.asyncIterator in result) {
+            let output = '';
+            for await (const chunk of result) {
+              if (attemptSignal?.aborted) {
+                throw createAbortError('Chat stream aborted');
+              }
+              output += chunk;
+            }
+            return { output };
+          }
+          return result;
+        }
+
+        const lcMessages = toLangChainMessages(messages);
+        const callConfig = attemptSignal ? { signal: attemptSignal } : undefined;
+        const aiMessage = await resolved.model.invoke(lcMessages, callConfig);
+        const output = typeof aiMessage.content === 'string'
+          ? aiMessage.content
+          : JSON.stringify(aiMessage.content ?? '');
+        const metadata = aiMessage.usage_metadata;
+        const usage = metadata ? {
+          inputTokens: metadata.input_tokens,
+          outputTokens: metadata.output_tokens,
+          totalTokens: metadata.total_tokens,
+        } : undefined;
+        return {
+          output,
+          message: { role: 'assistant' as const, content: output },
+          ...(usage ? { usage } : {}),
+        };
+      },
+    );
+
+    return value;
+  }
+
+  /**
+   * 弹性流式对话调用（供 POST /api/ai/chat/stream 复用，流式中途失败自动 resetDelta 并切备）
+   */
+  async chatStream(
+    messages: LlmMessage[],
+    options: ResilientChatStreamOptions = {},
+  ): Promise<LlmChatResult> {
+    const { value } = await this.executeWithResilience(
+      options,
+      async (resolved, attemptSignal, callbacks) => {
+        let output = '';
+        if (resolved.kind === 'custom') {
+          const result = await resolved.provider.chat(messages, {
+            model: resolved.modelKey,
+            tools: options.tools,
+            stream: true,
+            signal: attemptSignal,
+            temperature: resolved.params.temperature,
+            ...(resolved.params.maxTokens !== undefined ? { maxTokens: resolved.params.maxTokens } : {}),
+            ...(resolved.params.topP !== undefined ? { topP: resolved.params.topP } : {}),
+            ...(resolved.params.timeoutMs !== undefined ? { timeoutMs: resolved.params.timeoutMs } : {}),
+          });
+          if (Symbol.asyncIterator in result) {
+            for await (const chunk of result) {
+              if (attemptSignal?.aborted) {
+                throw createAbortError('Chat stream aborted');
+              }
+              output += chunk;
+              if (chunk && options.onDelta) {
+                callbacks.markDeltaEmitted();
+                await options.onDelta(chunk);
+              }
+            }
+            return { output };
+          }
+          output = result.output;
+          if (output && options.onDelta) {
+            callbacks.markDeltaEmitted();
+            await options.onDelta(output);
+          }
+          return result;
+        }
+
+        const callConfig = attemptSignal ? { signal: attemptSignal } : undefined;
+        const stream = await resolved.model.stream(toLangChainMessages(messages), callConfig);
+        for await (const chunk of stream) {
+          if (attemptSignal?.aborted) {
+            throw createAbortError('Chat stream aborted');
+          }
+          const text = this.extractDeltaChunkText(chunk.content);
+          if (text) {
+            output += text;
+            if (options.onDelta) {
+              callbacks.markDeltaEmitted();
+              await options.onDelta(text);
+            }
+          }
+        }
+        return { output };
+      },
+    );
+
+    return value;
+  }
+
+  private async executeWithResilience<T>(
+    options: ResilienceRunOptions,
+    runAttempt: (
+      resolved: ResolvedLlm,
+      attemptSignal: AbortSignal | undefined,
+      callbacks: AttemptCallbacks,
+    ) => Promise<T>,
+  ): Promise<{ value: T; modelKey: string; fallbacks: LlmFallbackEvent[] }> {
     if (options.signal?.aborted) {
-      throw new Error('Planner invocation aborted');
+      throw createAbortError('Planner invocation aborted');
     }
 
-    const resolved = resolveLlm(this.config, options.model);
-    if (resolved.kind === 'custom') {
-      return this.planWithProvider(resolved.provider, messages, tools, options);
+    const { candidates } = resolveLlmCandidates(this.config, options.model, options.fallbacks);
+    const hasFallbacks = candidates.length > 1;
+    const cbPolicy = resolveCircuitBreakerConfig(this.config, hasFallbacks);
+    const fallbacks: LlmFallbackEvent[] = [];
+    let lastError: unknown;
+
+    for (let i = 0; i < candidates.length; i++) {
+      if (options.signal?.aborted) {
+        throw createAbortError('Planner invocation aborted');
+      }
+
+      const candidateKey = candidates[i];
+      const nextModel = candidates[i + 1];
+      const acquired = this.circuitBreaker.tryAcquire(candidateKey, cbPolicy);
+
+      if (!acquired.allowed) {
+        lastError = new LlmCircuitOpenError(candidateKey, acquired.nextAttemptAt);
+        if (nextModel) {
+          const event: LlmFallbackEvent = {
+            fromModel: candidateKey,
+            toModel: nextModel,
+            reason: 'circuit_open',
+            code: 'LLM_CIRCUIT_OPEN',
+            circuitState: acquired.state,
+            attempt: i + 1,
+          };
+          fallbacks.push(event);
+          await options.onFallback?.(event);
+          continue;
+        }
+        throw lastError;
+      }
+
+      const { isProbe } = acquired;
+      let resolved: ResolvedLlm;
+      try {
+        resolved = resolveLlm(this.config, candidateKey, {
+          temperature: options.temperature,
+          maxTokens: options.maxTokens,
+          topP: options.topP,
+          timeoutMs: options.timeoutMs,
+          timeout: options.timeout,
+          maxRetries: options.maxRetries,
+          hasFallbacks,
+        });
+      } catch (configError) {
+        this.circuitBreaker.releaseProbe(candidateKey, isProbe);
+        throw configError;
+      }
+
+      const timeoutMs = resolved.params.timeoutMs;
+      const needsController = Boolean(options.signal || (timeoutMs !== undefined && timeoutMs > 0));
+      let attemptController: AbortController | undefined;
+      let timedOut = false;
+      let timer: NodeJS.Timeout | undefined;
+      let onCallerAbort: (() => void) | undefined;
+      let timeoutPromise: Promise<never> | undefined;
+
+      if (needsController) {
+        attemptController = new AbortController();
+        if (options.signal) {
+          onCallerAbort = () => attemptController!.abort(options.signal?.reason);
+          if (options.signal.aborted) {
+            attemptController.abort(options.signal.reason);
+          } else {
+            options.signal.addEventListener('abort', onCallerAbort, { once: true });
+          }
+        }
+        if (timeoutMs !== undefined && timeoutMs > 0) {
+          timeoutPromise = new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => {
+              timedOut = true;
+              const timeoutErr = new Error(`LLM request timed out after ${timeoutMs}ms`);
+              timeoutErr.name = 'TimeoutError';
+              attemptController!.abort(timeoutErr);
+              reject(timeoutErr);
+            }, timeoutMs);
+            timer.unref?.();
+          });
+        }
+      }
+
+      let deltaPending = false;
+      const callbacks: AttemptCallbacks = {
+        markDeltaEmitted: () => {
+          deltaPending = true;
+        },
+        markDeltaReset: () => {
+          deltaPending = false;
+        },
+      };
+
+      try {
+        const attemptPromise = runAttempt(resolved, attemptController?.signal, callbacks);
+        if (timeoutPromise) {
+          attemptPromise.catch(() => undefined);
+        }
+        const value = timeoutPromise
+          ? await Promise.race([attemptPromise, timeoutPromise])
+          : await attemptPromise;
+
+        this.circuitBreaker.recordSuccess(candidateKey, isProbe);
+        return { value, modelKey: candidateKey, fallbacks };
+      } catch (err: unknown) {
+        if (options.signal?.aborted) {
+          this.circuitBreaker.releaseProbe(candidateKey, isProbe);
+          throw err;
+        }
+
+        const classification = classifyLlmError(err, timedOut);
+        if (!classification.retryable) {
+          this.circuitBreaker.releaseProbe(candidateKey, isProbe);
+          throw this.formatAttemptError(resolved, err);
+        }
+
+        const circuitState = this.circuitBreaker.recordFailure(
+          candidateKey,
+          cbPolicy,
+          classification.code,
+          isProbe,
+        );
+
+        if (deltaPending) {
+          deltaPending = false;
+          await options.resetDelta?.();
+        }
+
+        lastError = this.formatAttemptError(resolved, err);
+        if (nextModel && classification.reason) {
+          const event: LlmFallbackEvent = {
+            fromModel: candidateKey,
+            toModel: nextModel,
+            reason: classification.reason,
+            code: classification.code,
+            ...(classification.statusCode !== undefined ? { statusCode: classification.statusCode } : {}),
+            circuitState,
+            attempt: i + 1,
+          };
+          fallbacks.push(event);
+          await options.onFallback?.(event);
+          continue;
+        }
+        throw lastError;
+      } finally {
+        if (timer) {
+          clearTimeout(timer);
+        }
+        if (options.signal && onCallerAbort) {
+          options.signal.removeEventListener('abort', onCallerAbort);
+        }
+      }
     }
 
+    throw lastError ?? new Error('All configured LLM candidates failed');
+  }
+
+  private async planWithLangChain(
+    resolved: Extract<ResolvedLlm, { kind: 'langchain' }>,
+    messages: LlmMessage[],
+    tools: StructuredTool[],
+    options: LangChainPlanOptions,
+    attemptSignal: AbortSignal | undefined,
+    callbacks: AttemptCallbacks,
+  ): Promise<LangChainPlanResult> {
     // 1. 转换消息为 LangChain 标准消息体系
     const lcMessages = toLangChainMessages(messages);
     // 2. 绑定工具并触发模型推理
@@ -244,55 +610,42 @@ export class LangChainPlannerService {
     let aiMessage: AIMessage;
     let emittedDelta = false;
     let didResetDelta = false;
-    const callConfig = options.signal ? { signal: options.signal } : undefined;
+    const callConfig = attemptSignal ? { signal: attemptSignal } : undefined;
 
-    try {
-      if (options.onDelta && typeof (boundModel as { stream?: unknown }).stream === 'function') {
-        const stream = await (boundModel as {
-          stream: (input: BaseMessage[], config?: { signal?: AbortSignal }) => Promise<AsyncIterable<AIMessageChunk>> | AsyncIterable<AIMessageChunk>;
-        }).stream(lcMessages, callConfig);
-        let aggregated: AIMessageChunk | undefined;
-        let sawToolCalls = false;
+    if (options.onDelta && typeof (boundModel as { stream?: unknown }).stream === 'function') {
+      const stream = await (boundModel as {
+        stream: (input: BaseMessage[], config?: { signal?: AbortSignal }) => Promise<AsyncIterable<AIMessageChunk>> | AsyncIterable<AIMessageChunk>;
+      }).stream(lcMessages, callConfig);
+      let aggregated: AIMessageChunk | undefined;
+      let sawToolCalls = false;
 
-        for await (const chunk of stream) {
-          if (options.signal?.aborted) {
-            throw new Error('Planner stream aborted');
+      for await (const chunk of stream) {
+        if (attemptSignal?.aborted) {
+          throw createAbortError('Planner stream aborted');
+        }
+        aggregated = aggregated ? aggregated.concat(chunk) : chunk;
+        const hasChunkToolCalls = (Array.isArray(chunk.tool_call_chunks) && chunk.tool_call_chunks.length > 0)
+          || (Array.isArray(chunk.tool_calls) && chunk.tool_calls.length > 0)
+          || this.extractAdditionalToolCalls(chunk as unknown as AIMessage).length > 0;
+        if (hasChunkToolCalls) {
+          sawToolCalls = true;
+          if (emittedDelta && !didResetDelta) {
+            didResetDelta = true;
+            callbacks.markDeltaReset();
+            await options.resetDelta?.();
           }
-          aggregated = aggregated ? aggregated.concat(chunk) : chunk;
-          const hasChunkToolCalls = (Array.isArray(chunk.tool_call_chunks) && chunk.tool_call_chunks.length > 0)
-            || (Array.isArray(chunk.tool_calls) && chunk.tool_calls.length > 0)
-            || this.extractAdditionalToolCalls(chunk as unknown as AIMessage).length > 0;
-          if (hasChunkToolCalls) {
-            sawToolCalls = true;
-            if (emittedDelta && !didResetDelta) {
-              didResetDelta = true;
-              await options.resetDelta?.();
-            }
-          } else if (!sawToolCalls) {
-            const text = this.extractDeltaChunkText(chunk.content);
-            if (text) {
-              emittedDelta = true;
-              await options.onDelta(text);
-            }
+        } else if (!sawToolCalls) {
+          const text = this.extractDeltaChunkText(chunk.content);
+          if (text) {
+            emittedDelta = true;
+            callbacks.markDeltaEmitted();
+            await options.onDelta(text);
           }
         }
-        aiMessage = (aggregated ?? new AIMessage('')) as unknown as AIMessage;
-      } else {
-        aiMessage = (await boundModel.invoke(lcMessages, callConfig)) as AIMessage;
       }
-    } catch (err: unknown) {
-      if (options.signal?.aborted) {
-        throw err;
-      }
-      const error = err as Error;
-      const targetEndpoint = resolved.model.clientConfig.baseURL || 'https://api.openai.com/v1';
-
-      const planError = new Error(
-        `LangChain planner invocation failed for model "${resolved.model.model}" ` +
-        `at endpoint "${targetEndpoint}": ${error?.message || String(err)}`,
-      );
-      (planError as unknown as { cause?: unknown }).cause = err;
-      throw planError;
+      aiMessage = (aggregated ?? new AIMessage('')) as unknown as AIMessage;
+    } else {
+      aiMessage = (await boundModel.invoke(lcMessages, callConfig)) as AIMessage;
     }
 
     // 读取模型供应商上报的实际用量，保留到规划结果中。
@@ -311,6 +664,7 @@ export class LangChainPlannerService {
     if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
       if (emittedDelta && !didResetDelta) {
         didResetDelta = true;
+        callbacks.markDeltaReset();
         await options.resetDelta?.();
       }
       return { ...this.handleNativeToolCalls(rawToolCalls, aiMessage.content), usage };
@@ -322,6 +676,7 @@ export class LangChainPlannerService {
     if (fallbackResult) {
       if (fallbackResult.toolCalls?.length && emittedDelta && !didResetDelta) {
         didResetDelta = true;
+        callbacks.markDeltaReset();
         await options.resetDelta?.();
       }
       return { ...fallbackResult, usage };
@@ -334,6 +689,20 @@ export class LangChainPlannerService {
       response: { role: 'assistant', content },
       planner: 'langchain',
     };
+  }
+
+  private formatAttemptError(resolved: ResolvedLlm, err: unknown): Error {
+    if (resolved.kind === 'custom') {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+    const error = err as Error;
+    const targetEndpoint = resolved.model.clientConfig.baseURL || 'https://api.openai.com/v1';
+    const planError = new Error(
+      `LangChain planner invocation failed for model "${resolved.model.model}" ` +
+      `at endpoint "${targetEndpoint}": ${error?.message || String(err)}`,
+    );
+    (planError as unknown as { cause?: unknown }).cause = err;
+    return planError;
   }
 
   private extractDeltaChunkText(content: unknown): string {
@@ -353,14 +722,18 @@ export class LangChainPlannerService {
   }
 
   private async planWithProvider(
-    provider: LlmProvider,
+    resolved: Extract<ResolvedLlm, { kind: 'custom' }>,
     messages: LlmMessage[],
     tools: StructuredTool[],
-    options: LangChainPlanOptions = {},
+    attemptSignal: AbortSignal | undefined,
   ): Promise<LangChainPlanResult> {
-    const result = await provider.chat(messages, {
-      model: options.model,
-      signal: options.signal,
+    const result = await resolved.provider.chat(messages, {
+      model: resolved.modelKey,
+      signal: attemptSignal,
+      temperature: resolved.params.temperature,
+      ...(resolved.params.maxTokens !== undefined ? { maxTokens: resolved.params.maxTokens } : {}),
+      ...(resolved.params.topP !== undefined ? { topP: resolved.params.topP } : {}),
+      ...(resolved.params.timeoutMs !== undefined ? { timeoutMs: resolved.params.timeoutMs } : {}),
       tools: tools.map((tool) => ({
         type: 'function',
         function: {

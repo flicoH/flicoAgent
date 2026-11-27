@@ -889,9 +889,10 @@
         "type": "object",
         "properties": {
           "usage": {"oneOf": [{"$ref": "#/components/schemas/TokenUsage"}, {"type": "null"}]},
-          "type": {"enum": ["plan", "skill", "tool", "observe", "final", "guardrail", "approval"]},
+          "type": {"enum": ["plan", "skill", "tool", "observe", "final", "guardrail", "approval", "fallback"]},
           "iteration": {"type": "integer"},
           "name": {"type": "string"},
+          "model": {"type": "string"},
           "source": {"enum": ["builtin", "mcp"]},
           "input": {},
           "output": {},
@@ -961,7 +962,12 @@
           "delegationOnly": {"type": "boolean"},
           "mode": {"type": "string", "enum": ["react", "plan-and-execute", "reflection"], "default": "react"},
           "maxReflectionRevisions": {"type": "integer", "minimum": 0, "default": 1},
-          "model": {"type": "string"}
+          "model": {"type": "string"},
+          "fallbacks": {"type": "array", "items": {"type": "string"}},
+          "temperature": {"type": "number", "minimum": 0},
+          "maxTokens": {"type": "integer", "minimum": 1},
+          "topP": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+          "timeoutMs": {"type": "integer", "minimum": 1}
         },
         "required": ["name", "skills", "tools"]
       },
@@ -979,7 +985,18 @@
             "type": "object",
             "properties": {
               "default": {"type": ["string", "null"]},
-              "models": {"type": "array", "items": {"type": "string"}}
+              "models": {"type": "array", "items": {"type": "string"}},
+              "fallbacks": {"type": "array", "items": {"type": "string"}},
+              "circuitBreaker": {
+                "type": "object",
+                "properties": {
+                  "enabled": {"type": "boolean"},
+                  "failureThreshold": {"type": "integer", "minimum": 1},
+                  "cooldownMs": {"type": "integer", "minimum": 1},
+                  "halfOpenMaxCalls": {"type": "integer", "minimum": 1}
+                },
+                "required": ["enabled", "failureThreshold", "cooldownMs", "halfOpenMaxCalls"]
+              }
             },
             "required": ["default", "models"]
           },

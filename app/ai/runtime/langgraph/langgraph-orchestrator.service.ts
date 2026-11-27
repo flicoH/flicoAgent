@@ -714,6 +714,14 @@ export class LangGraphOrchestratorService {
       await emit({ type: 'delta_reset' });
     } : undefined;
 
+    const agentLlmOptions = {
+      ...(agent.temperature !== undefined ? { temperature: agent.temperature } : {}),
+      ...(agent.maxTokens !== undefined ? { maxTokens: agent.maxTokens } : {}),
+      ...(agent.topP !== undefined ? { topP: agent.topP } : {}),
+      ...(agent.timeoutMs !== undefined ? { timeoutMs: agent.timeoutMs } : {}),
+      ...(agent.timeout !== undefined ? { timeout: agent.timeout } : {}),
+    };
+
     const graph = createAgentGraph({
       planner: this.planner,
       executor: this.executor,
@@ -721,6 +729,8 @@ export class LangGraphOrchestratorService {
       runId: run.runId,
       agentName,
       agentModel: agent.model,
+      agentFallbacks: agent.fallbacks,
+      ...(Object.keys(agentLlmOptions).length ? { agentLlmOptions } : {}),
       mode: agent.mode,
       maxReflectionRevisions: agent.maxReflectionRevisions,
       signal,

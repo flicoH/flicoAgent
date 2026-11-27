@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { END, START, StateGraph } from '@langchain/langgraph';
+import type { LlmGenerationOptions } from '../../../config/bootstrap-options';
 import type { AgentLoopMode } from '../../agent/agent.interface';
-import type { ExecutionResult, LlmToolMessage } from '../../contracts';
+import type { ExecutionResult, LlmFallbackEvent, LlmToolMessage } from '../../contracts';
 import { CapabilityApprovalRequired, ExecutorService } from '../../tool/executor.service';
 import { isTokenUsage } from '../../trace/token-usage';
+import { sanitizeLlmFallbackMessage } from '../internal/llm-circuit-breaker';
 import type {
   LangChainPlannerService,
   LangChainToolCall,
@@ -24,6 +26,8 @@ export interface AgentGraphDeps {
   runId: string;
   agentName: string;
   agentModel?: string;
+  agentFallbacks?: string[];
+  agentLlmOptions?: LlmGenerationOptions;
   mode?: AgentLoopMode;
   maxReflectionRevisions?: number;
   signal?: AbortSignal;
@@ -31,6 +35,34 @@ export interface AgentGraphDeps {
   onDelta?: (content: string) => void | Promise<void>;
   resetDelta?: () => void | Promise<void>;
   recordStep?: (step: GraphStep) => Promise<void> | void;
+}
+
+function buildFallbackStep(
+  node: NonNullable<GraphStep['node']>,
+  iteration: number,
+  event: LlmFallbackEvent,
+): GraphStep {
+  return {
+    type: 'fallback',
+    node,
+    planner: 'langchain',
+    iteration,
+    name: `${event.fromModel}->${event.toModel}`,
+    model: event.toModel,
+    output: {
+      fromModel: event.fromModel,
+      toModel: event.toModel,
+      reason: event.reason,
+      ...(event.statusCode !== undefined ? { statusCode: event.statusCode } : {}),
+      ...(event.circuitState ? { circuitState: event.circuitState } : {}),
+      attempt: event.attempt,
+    },
+    error: {
+      code: event.code,
+      message: sanitizeLlmFallbackMessage(event),
+    },
+    timestamp: new Date().toISOString(),
+  };
 }
 
 function serializeObservation(value: unknown): string {
@@ -102,14 +134,22 @@ function createTextStage(
     }
 
     const iteration = state.iteration + 1;
+    const fallbackSteps: GraphStep[] = [];
     const startedAt = Date.now();
     const result = await deps.planner.plan(
       [...state.messages, { role: 'user', content: instruction(state) }],
       [],
       {
         model: deps.agentModel,
+        ...(deps.agentFallbacks ? { fallbacks: deps.agentFallbacks } : {}),
+        ...(deps.agentLlmOptions ?? {}),
         signal: deps.signal,
         ...(node === 'synthesize' ? { onDelta: deps.onDelta, resetDelta: deps.resetDelta } : {}),
+        onFallback: async (event) => {
+          const fallbackStep = buildFallbackStep(node, iteration, event);
+          fallbackSteps.push(fallbackStep);
+          await deps.recordStep?.(fallbackStep);
+        },
       },
     );
     const modelDurationMs = Math.max(0, Date.now() - startedAt);
@@ -123,6 +163,7 @@ function createTextStage(
       node,
       planner: 'langchain',
       iteration,
+      ...(result.model ? { model: result.model } : {}),
       output: terminalError ? stage.update.finalAnswer : stage.output,
       error: stage.error,
       usage: isTokenUsage(result.usage) ? result.usage : null,
@@ -130,7 +171,7 @@ function createTextStage(
       timestamp: new Date().toISOString(),
     };
     await deps.recordStep?.(step);
-    return { ...stage.update, iteration, steps: [step] };
+    return { ...stage.update, iteration, steps: [...fallbackSteps, step] };
   };
 }
 
@@ -295,11 +336,19 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
     }
 
     const streamDeltas = !deps.mode || deps.mode === 'react';
+    const fallbackSteps: GraphStep[] = [];
     const startedAt = Date.now();
     const planResult = await deps.planner.plan(state.messages, state.tools, {
       model: deps.agentModel,
+      ...(deps.agentFallbacks ? { fallbacks: deps.agentFallbacks } : {}),
+      ...(deps.agentLlmOptions ?? {}),
       signal: deps.signal,
       ...(streamDeltas ? { onDelta: deps.onDelta, resetDelta: deps.resetDelta } : {}),
+      onFallback: async (event) => {
+        const fallbackStep = buildFallbackStep('plan', currentIteration, event);
+        fallbackSteps.push(fallbackStep);
+        await deps.recordStep?.(fallbackStep);
+      },
     });
     const modelDurationMs = Math.max(0, Date.now() - startedAt);
     throwIfAborted(deps.signal);
@@ -308,7 +357,12 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
 
     if (planResult.toolCalls && planResult.toolCalls.length > 0) {
       const firstCall = planResult.toolCalls[0];
-      const planStep: GraphStep = { ...buildPlanToolStep(currentIteration, firstCall), usage, modelDurationMs };
+      const planStep: GraphStep = {
+        ...buildPlanToolStep(currentIteration, firstCall),
+        ...(planResult.model ? { model: planResult.model } : {}),
+        usage,
+        modelDurationMs,
+      };
 
       if (deps.recordStep) {
         await deps.recordStep(planStep);
@@ -329,12 +383,17 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
         approvedCallId: undefined,
         rejectedCallId: undefined,
         finalAnswer: undefined,
-        steps: [planStep],
+        steps: [...fallbackSteps, planStep],
       };
     }
 
     const finalOutput = planResult.finalAnswer ?? '';
-    const planStep: GraphStep = { ...buildPlanFinalStep(currentIteration, finalOutput), usage, modelDurationMs };
+    const planStep: GraphStep = {
+      ...buildPlanFinalStep(currentIteration, finalOutput),
+      ...(planResult.model ? { model: planResult.model } : {}),
+      usage,
+      modelDurationMs,
+    };
 
     if (deps.recordStep) {
       await deps.recordStep(planStep);
@@ -361,7 +420,7 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
       rejectedCallId: undefined,
       finalAnswer: executingTask ? undefined : finalOutput,
       ...(executingTask ? { taskIndex: state.taskIndex + 1 } : {}),
-      steps: [planStep],
+      steps: [...fallbackSteps, planStep],
     };
   };
 }

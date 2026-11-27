@@ -30,9 +30,17 @@ import {
 import { resolveGuardrailRuleSet } from './guardrail/internal/load-guardrail-config';
 import { resolveMemoryMaxTurns, resolveThreadEnabled } from './memory/internal/load-memory-config';
 import { resolveRagOptions } from './rag/internal/load-rag-config';
-import { resolveLlm } from './runtime/internal/load-llm-config';
+import {
+  readLlmConfig,
+  resolveCircuitBreakerConfig,
+  resolveLlm,
+  resolveLlmCandidates,
+} from './runtime/internal/load-llm-config';
 import { resolveMaxIterations } from './runtime/internal/load-runtime-config';
-import { toLangChainMessages } from './runtime/langchain/langchain-planner.service';
+import {
+  LangChainPlannerService,
+  toLangChainMessages,
+} from './runtime/langchain/langchain-planner.service';
 import {
   LangGraphOrchestratorService,
   toPublicRunDetail,
@@ -152,11 +160,15 @@ export class AiController {
     private readonly configService: ConfigService,
     @Optional() private readonly skills?: SkillScannerService,
     @Optional() private readonly executor?: ExecutorService,
+    @Optional() private readonly planner?: LangChainPlannerService,
   ) {}
 
   @Post('chat')
   async chat(@Body() body: ChatRequest): Promise<LlmChatResult> {
     const { messages, model, tools } = resolveChatMessages(body);
+    if (this.planner) {
+      return this.planner.chat(messages, { model, tools });
+    }
     const resolved = resolveLlm(this.configService, model);
     if (resolved.kind === 'custom') {
       const result = await resolved.provider.chat(messages, { model, tools });
@@ -187,6 +199,31 @@ export class AiController {
   @Post('chat/stream')
   async chatStream(@Body() body: ChatRequest, @Res() response: Response): Promise<void> {
     const { messages, model, tools } = resolveChatMessages(body);
+    if (this.planner) {
+      resolveLlmCandidates(this.configService, model);
+      this.initSseResponse(response);
+      const heartbeat = this.startHeartbeat(response);
+      try {
+        const result = await this.planner.chatStream(messages, {
+          model,
+          tools,
+          onDelta: (content) => {
+            this.sendSseEvent(response, 'delta', { content });
+          },
+          resetDelta: () => {
+            this.sendSseEvent(response, 'delta_reset', {});
+          },
+        });
+        this.sendSseEvent(response, 'done', result);
+      } catch {
+        this.sendSseEvent(response, 'error', { success: false, message: 'Chat stream failed', code: 500 });
+      } finally {
+        clearInterval(heartbeat);
+        response.end();
+      }
+      return;
+    }
+
     const resolved = resolveLlm(this.configService, model);
     this.initSseResponse(response);
     const heartbeat = this.startHeartbeat(response);
@@ -529,6 +566,14 @@ export class AiController {
     const vectorDriver = vectorObj?.driver === 'mysql' || vectorObj?.driver === 'qdrant' ? vectorObj.driver : 'file';
     const guardrail = resolveGuardrailRuleSet(this.configService);
 
+    const llmConfig = readLlmConfig(this.configService);
+    const llmFallbacks = Array.isArray(llmConfig?.fallbacks)
+      ? llmConfig.fallbacks.filter((name): name is string => typeof name === 'string' && Boolean(name.trim())).map(name => name.trim())
+      : [];
+    const llmCircuitBreaker = llmConfig?.circuitBreaker !== undefined
+      ? resolveCircuitBreakerConfig(this.configService, llmFallbacks.length > 0)
+      : undefined;
+
     return {
       threadEnabled: resolveThreadEnabled(this.configService),
       maxIterations: resolveMaxIterations(this.configService),
@@ -538,6 +583,8 @@ export class AiController {
       llm: {
         default: defaultLlm,
         models: modelNames(llm?.models),
+        ...(llmFallbacks.length ? { fallbacks: llmFallbacks } : {}),
+        ...(llmCircuitBreaker ? { circuitBreaker: llmCircuitBreaker } : {}),
       },
       embedding: {
         default: defaultEmbedding,
