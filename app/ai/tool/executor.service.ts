@@ -1,37 +1,97 @@
 import { Injectable } from '@nestjs/common';
-import { SkillScannerService } from '../skill/skill-scanner.service';
-import { ToolRegistryService } from './tool-registry.service';
+import Ajv from 'ajv';
 import { ExecutionResult } from '../contracts';
+import type { SkillDefinition } from '../skill/skill.interface';
+import { SkillScannerService } from '../skill/skill-scanner.service';
+import type { ToolDefinition } from './tool.interface';
+import { ToolRegistryService } from './tool-registry.service';
+
+export class CapabilityApprovalRequired extends Error {
+  readonly code = 'CAPABILITY_APPROVAL_REQUIRED';
+
+  constructor(
+    readonly kind: 'skill' | 'tool',
+    readonly capabilityName: string,
+    readonly input: unknown,
+  ) {
+    super(`Capability "${capabilityName}" requires approval before execution`);
+    this.name = 'CapabilityApprovalRequired';
+  }
+}
+
+export class CapabilityInputInvalid extends Error {
+  readonly code = 'INVALID_CAPABILITY_INPUT';
+
+  constructor(
+    readonly capabilityName: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = 'CapabilityInputInvalid';
+  }
+}
+
+export interface ExecuteOptions {
+  approved?: boolean;
+  checkApproval?: boolean;
+}
 
 /**
  * 能力执行器服务 (ExecutorService)
  *
  * 【调度执行中枢】
- * 接收 Planner 解析出的调用指令，将能力名称分发给对应的具体实现：
- * 1. 优先在 `SkillScannerService` 中匹配业务技能（传入 SkillContext 上下文）；
- * 2. 次选在 `ToolRegistryService` 中匹配通用工具；同名时 Skill 优先；
- * 3. 错误自愈设计：若发生未找到能力或执行异常，不直接抛错中断循环，
- *    而是捕获并封装为结构化的 `observe` 观察错误，使得模型在下一轮 ReAct 中获知失败原因并尝试自愈或纠错。
+ * 1. 按 Agent 白名单匹配 Skill（优先）或 Tool；
+ * 2. 执行前通过 ajv 校验 inputSchema，不合法时返回 INVALID_CAPABILITY_INPUT 观察错误；
+ * 3. 对声明 approval: 'required' 的能力强制执行审批拦截（委派运行直接拒绝，主运行抛出 CapabilityApprovalRequired 供编排器挂起）；
+ * 4. 提供 invokeSkill 直调入口，禁止通过直调绕过审批与 Schema 校验。
  */
 @Injectable()
 export class ExecutorService {
-  /**
-   * 构造函数注入技能扫描服务与工具注册服务
-   * @param skills 业务技能扫描器
-   * @param tools 通用工具注册表
-   */
+  private readonly ajv = new Ajv({ allErrors: true, coerceTypes: false });
+  private readonly validatorCache = new WeakMap<object, Ajv.ValidateFunction>();
+
   constructor(
     private readonly skills: SkillScannerService,
     private readonly tools: ToolRegistryService,
   ) {}
 
   /**
+   * 直接调用 Skill（供 HTTP 直调端点或业务层使用）。
+   * 同步检查 approval === 'required'，避免任何调用方绕过审批门禁。
+   */
+  invokeSkill(
+    skill: SkillDefinition,
+    input: unknown,
+    context: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    if (skill.approval === 'required') {
+      throw new CapabilityApprovalRequired('skill', skill.name, input);
+    }
+    const validationError = this.validateInput(skill.name, skill.inputSchema, input);
+    if (validationError) {
+      throw new CapabilityInputInvalid(skill.name, validationError);
+    }
+    return Promise.resolve().then(() => skill.execute(input, context));
+  }
+
+  /**
+   * 预检能力归属、白名单与审批声明
+   */
+  resolveCapability(
+    name: string,
+    permissions?: { skills: string[]; tools: string[] },
+  ): { kind: 'skill'; definition: SkillDefinition } | { kind: 'tool'; definition: ToolDefinition } | null {
+    const skillAllowed = !permissions || permissions.skills.includes(name);
+    const toolAllowed = !permissions || permissions.tools.includes(name);
+    const skill = skillAllowed ? this.skills.get(name) : undefined;
+    if (skill) return { kind: 'skill', definition: skill };
+    const tool = toolAllowed ? this.tools.get(name) : undefined;
+    if (tool) return { kind: 'tool', definition: tool };
+    return null;
+  }
+
+  /**
    * 执行指定名称的能力（Skill 或 Tool）
-   *
-   * @param name 能力名称
-   * @param input 模型传入的实参
-   * @param context 当前运行链路上下文（如 runId、agent 名称）；仅传给 Skill
-   * @returns 结构化执行结果 ExecutionResult
    */
   async execute(
     name: string,
@@ -39,14 +99,24 @@ export class ExecutorService {
     context: Record<string, unknown>,
     permissions?: { skills: string[]; tools: string[] },
     delegated = false,
+    options?: ExecuteOptions,
   ): Promise<ExecutionResult> {
     const skillAllowed = !permissions || permissions.skills.includes(name);
     const toolAllowed = !permissions || permissions.tools.includes(name);
-    // 同名能力保留 Skill 优先级，并分别校验两类白名单。
+
     const skill = skillAllowed ? this.skills.get(name) : undefined;
     if (skill) {
-      if (delegated && skill.approval === 'required') {
-        return this.delegatedApprovalError(name);
+      const validationError = this.validateInput(name, skill.inputSchema, input);
+      if (validationError) {
+        return this.invalidInputError(name, validationError);
+      }
+      if (skill.approval === 'required') {
+        if (delegated) {
+          return this.delegatedApprovalError(name);
+        }
+        if (options?.checkApproval && !options.approved) {
+          throw new CapabilityApprovalRequired('skill', name, input);
+        }
       }
       try {
         return {
@@ -59,25 +129,32 @@ export class ExecutorService {
       }
     }
 
-    // 2. 次选匹配通用 Tool
     const tool = toolAllowed ? this.tools.get(name) : undefined;
     if (tool) {
-      if (delegated && tool.approval === 'required') {
-        return this.delegatedApprovalError(name);
+      const validationError = this.validateInput(name, tool.inputSchema, input);
+      if (validationError) {
+        return this.invalidInputError(name, validationError);
+      }
+      if (tool.approval === 'required') {
+        if (delegated) {
+          return this.delegatedApprovalError(name);
+        }
+        if (options?.checkApproval && !options.approved) {
+          throw new CapabilityApprovalRequired('tool', name, input);
+        }
       }
       try {
         return {
           type: 'tool',
           name,
           source: tool.source ?? 'builtin',
-          output: await tool.execute(input),
+          output: await tool.execute(input, context),
         };
       } catch (error) {
         return this.executionError(name, error);
       }
     }
 
-    // 3. 能力未注册：返回结构化观察错误供模型在下一轮理解
     return {
       type: 'observe',
       name,
@@ -90,6 +167,39 @@ export class ExecutorService {
     };
   }
 
+  validateInput(name: string, schema: unknown, input: unknown): string | null {
+    if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+      return null;
+    }
+    const schemaObj = schema as Record<string, unknown>;
+    if (Object.keys(schemaObj).length === 0) {
+      return null;
+    }
+    let validator = this.validatorCache.get(schemaObj);
+    if (!validator) {
+      try {
+        validator = this.ajv.compile(schemaObj);
+        this.validatorCache.set(schemaObj, validator);
+      } catch {
+        return null;
+      }
+    }
+    const valid = validator(input);
+    if (valid) {
+      return null;
+    }
+    const detail = this.ajv.errorsText(validator.errors);
+    return `Invalid input for "${name}": ${detail}`;
+  }
+
+  private invalidInputError(name: string, message: string): ExecutionResult {
+    return {
+      type: 'observe',
+      name,
+      error: { code: 'INVALID_CAPABILITY_INPUT', message },
+    };
+  }
+
   private delegatedApprovalError(name: string): ExecutionResult {
     return {
       type: 'observe',
@@ -98,13 +208,6 @@ export class ExecutorService {
     };
   }
 
-  /**
-   * 将捕获的异常转换为统一的 observe 观察错误结构
-   *
-   * @param name 能力名称
-   * @param error 捕获到的异常对象
-   * @returns 结构化 ExecutionResult
-   */
   private executionError(name: string, error: unknown): ExecutionResult {
     return {
       type: 'observe',

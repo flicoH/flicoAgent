@@ -8,7 +8,7 @@ flicoAgent 是一个基于 NestJS 的应用框架内核，提供项目配置、�
 
 ## 功能概览
 
-- NestJS HTTP 服务，默认监听 `8080`
+- NestJS HTTP 服务，默认监听 `8080`（支持 `port` / `PORT` 环境变量与优雅停机）
 - 基于 `_ENV` 或 `__ENV` 加载环境配置
 - 自动加载业务工程 `dist/modules/**/*.module.js`、`dist/skills/**/*.skill.js` 和 `dist/agents/**/*.agent.js`
 - Vue 3 + Vite 多页面构建及 Nunjucks 页面模板
@@ -198,7 +198,7 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 
 - Agent 流发送 `start`、`step`、`delta`，成功时以 `done` 收尾。收到 `delta_reset` 时清空当前回答的临时文本，继续保留步骤。Chat 流发送 `delta` 与 `done`。响应开始后的失败以 `error` 事件返回，连接空闲时会发送心跳。
 - Skill 与 Tool 的 `inputSchema` 在执行前校验。`ai.tools.serviceInvoke` 以服务名为键，以开放的方法名数组为值。例如 `{ ProjectService: ['getProjectDetail'] }`。
-- `ai.store.trace.use`、`ai.store.memory.use`、`ai.store.vector.use` 接受存储实例或接收 `ConfigService` 的工厂。跨实例会话存储可实现 `MemoryStore.runTurn`，用共享锁协调同一线程。默认文件存储适用于单实例。
+- `ai.store.trace`、`ai.store.memory` 支持 `file`（默认）、`mysql`、`redis` 驱动或 `use` 工厂，`ai.store.vector` 支持 `file`、`mysql`、`qdrant` 或 `use` 工厂；`ai.access.nonceStore` 支持 `memory`（默认）、`mysql`、`redis` 跨实例防重放。详细接入见 [多实例生产存储与分布式防重放](docs/agent-operations.md#多实例生产存储与分布式防重放)。
 - 知识库提供文档列表、删除索引、重建、检索预览、Wiki 主题页读取和切片定位。原文可来自文件目录或 MySQL，向量索引支持文件、MySQL 和 Qdrant。检索支持原文 RAG、LLM Wiki 和混合模式（`ai.rag.mode`）。连接配置和引用定位见 [RAG 知识库](docs/agent-operations.md#rag-知识库)。
 
 ## npm 脚本
@@ -277,7 +277,7 @@ CLI 按顺序调用 Agent 同步接口，验证工具执行、RAG 引用、权�
 - **提示缺少模型 API Key**：确认当前环境配置文件存在、环境名正确，并且 `apiKey` 已读取到有效环境变量。
 - **业务模块或 Skill/Agent 未加载**：确认在业务工程根目录启动，并确认构建产物位于 `dist/modules/`、`dist/skills/`、`dist/agents/` 对应目录且文件名符合约定。
 - **页面模板或静态文件 404**：检查业务工程 `app/public/` 目录及构建输出；模板路径需匹配 `dist/entry.:page.tpl`。
-- **端口占用**：当前服务端口在 `app/main.ts` 中固定为 `8080`，请先释放该端口。
+- **端口占用**：可通过环境变量 `PORT`、配置文件 `port` 或 `serverStart({ port })` 切换端口（默认 `8080`）。
 
 ## 开发规范
 

@@ -48,7 +48,10 @@ export class ProjectService {
 
   getList({ projKey }: { projKey?: string }): ProjectConfig[] {
     return this.models.getModelList().reduce<ProjectConfig[]>((preList, { project }) => {
-      if (projKey && !project[projKey]) {
+      if (projKey) {
+        if (project[projKey]) {
+          preList.push(project[projKey]);
+        }
         return preList;
       }
 

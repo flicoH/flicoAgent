@@ -9,6 +9,13 @@ import type { TraceRun } from '../contracts';
  */
 export const TRACE_STORE = Symbol('TRACE_STORE');
 
+export interface TraceListQuery {
+  scope?: string;
+  agents?: readonly string[];
+  offset: number;
+  limit: number;
+}
+
 /**
  * 运行链路追踪存储契约 (TraceStore)
  *
@@ -30,6 +37,11 @@ export interface TraceStore {
    * @returns 匹配的 TraceRun 记录，未找到时返回 null
    */
   load(runId: string): Promise<TraceRun | null>;
+
+  /**
+   * 按 scope 与可选 Agent 白名单分页列出历史运行记录（按创建时间倒序）
+   */
+  list?(query: TraceListQuery): Promise<TraceRun[]>;
 }
 
 /**
@@ -90,6 +102,11 @@ export interface MemoryStore {
    * @param threadId 线程标识
    */
   delete?(threadId: string): Promise<void>;
+
+  /**
+   * 协调同一线程的并发轮次执行（跨实例存储可用分布式锁实现）
+   */
+  runTurn?<T>(threadId: string, task: () => Promise<T>): Promise<T>;
 }
 
 /**

@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { TraceRun } from '../../contracts';
-import type { TraceStore } from '../store.interface';
+import type { TraceListQuery, TraceStore } from '../store.interface';
 
 /**
  * 文件型 Trace 存储实现 (FileTraceStore)
@@ -65,12 +66,51 @@ export class FileTraceStore implements TraceStore {
   async save(run: TraceRun): Promise<void> {
     await mkdir(this.rootDir, { recursive: true });
     const target = this.filePath(run.runId);
-    const temporary = `${target}.tmp`;
+    const temporary = `${target}.${randomUUID()}.tmp`;
 
-    // 先写入同目录临时文件，再替换目标；固定临时文件名不协调同一 runId 的并发写入。
+    // 先写入唯一临时文件，再原子替换目标文件，避免并发写冲突。
     await writeFile(temporary, JSON.stringify(run, null, 2), 'utf8');
-    // 利用操作系统的 rename 系统调用原子替换目标文件
     await rename(temporary, target);
+  }
+
+  async list(query: TraceListQuery): Promise<TraceRun[]> {
+    let files: string[];
+    try {
+      files = await readdir(this.rootDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+
+    const runs: TraceRun[] = [];
+    for (const file of files) {
+      if (!file.endsWith('.json') || file.endsWith('.tmp')) {
+        continue;
+      }
+      try {
+        const content = await readFile(join(this.rootDir, file), 'utf8');
+        const parsed = JSON.parse(content) as TraceRun;
+        if (!parsed || typeof parsed.runId !== 'string') continue;
+        if (parsed.runId === 'default' && parsed.agent === 'default' && parsed.scope === undefined) continue;
+        if (parsed.scope !== query.scope) continue;
+        if (query.agents && !query.agents.includes(parsed.agent)) continue;
+        runs.push(parsed);
+      } catch {
+        // 忽略并发删除或损坏的文件
+      }
+    }
+
+    runs.sort((a, b) => {
+      const timeDiff = Date.parse(b.createdAt || '') - Date.parse(a.createdAt || '');
+      if (Number.isFinite(timeDiff) && timeDiff !== 0) return timeDiff;
+      return b.runId.localeCompare(a.runId);
+    });
+
+    const offset = Math.max(0, Math.floor(query.offset || 0));
+    const limit = Math.max(0, Math.floor(query.limit || 0));
+    return runs.slice(offset, offset + limit);
   }
 
   /**

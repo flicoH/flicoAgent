@@ -106,16 +106,7 @@ export function guardrailBlocked(steps: unknown): boolean {
     if (!step || typeof step !== 'object') {
       return false;
     }
-    const s = step as Record<string, unknown>;
-    if (s.type === 'guardrail') {
-      return true;
-    }
-    try {
-      const raw = JSON.stringify(step);
-      return raw.includes('"type":"guardrail"') || raw.includes('"guardrail"');
-    } catch {
-      return false;
-    }
+    return (step as Record<string, unknown>).type === 'guardrail';
   });
 }
 

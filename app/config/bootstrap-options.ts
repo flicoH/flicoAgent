@@ -1,8 +1,10 @@
+import type { NonceStoreOptions } from '../ai/access/nonce-store';
 import type { AgentRunAccess, EmbeddingProvider, LlmProvider } from '../ai/contracts';
 import type { GuardrailRuleSet } from '../ai/guardrail/guardrail.interface';
 import type { McpConfig } from '../ai/mcp/mcp.types';
 import type { RagOptions } from '../ai/rag/rag.interface';
-import type { VectorStore } from '../ai/store/store.interface';
+import type { RedisLikeClient } from '../ai/store/reference/redis-store';
+import type { MemoryStore, TraceStore, VectorStore } from '../ai/store/store.interface';
 import type { ConfigService } from './config.service';
 
 export interface LlmModelOptions {
@@ -34,6 +36,18 @@ export interface EmbeddingOptions extends EmbeddingModelOptions {
 }
 
 export type VectorStoreDriver = 'file' | 'mysql' | 'qdrant';
+export type TraceStoreDriver = 'file' | 'mysql' | 'redis';
+export type MemoryStoreDriver = 'file' | 'mysql' | 'redis';
+
+export interface TraceStoreOptions {
+  driver?: TraceStoreDriver;
+  path?: string;
+  namespace?: string;
+  prefix?: string;
+  ttlMs?: number;
+  client?: RedisLikeClient;
+  use?: TraceStore | ((config: ConfigService) => TraceStore | Promise<TraceStore>);
+}
 
 export interface VectorStoreOptions {
   driver?: VectorStoreDriver;
@@ -47,13 +61,22 @@ export interface VectorStoreOptions {
 }
 
 export interface MemoryStoreOptions {
+  driver?: MemoryStoreDriver;
   path?: string;
+  namespace?: string;
+  prefix?: string;
+  ttlMs?: number;
+  lockTtlMs?: number;
+  lockTimeoutMs?: number;
+  lockTimeoutSeconds?: number;
+  client?: RedisLikeClient;
   maxTurns?: number;
   threadEnabled?: boolean;
+  use?: MemoryStore | ((config: ConfigService) => MemoryStore | Promise<MemoryStore>);
 }
 
 export interface AiStoreOptions {
-  trace?: string;
+  trace?: string | TraceStoreOptions;
   vector?: string | VectorStoreOptions;
   memory?: string | MemoryStoreOptions;
 }
@@ -61,6 +84,12 @@ export interface AiStoreOptions {
 export interface AgentAccessOptions {
   authorize?: (request: any) => AgentRunAccess | null | Promise<AgentRunAccess | null>;
   keys?: Record<string, AgentRunAccess & { secret: string }>;
+  nonceStore?: NonceStoreOptions;
+}
+
+export interface AiToolsOptions {
+  serviceInvoke?: Record<string, string[]>;
+  serviceInvokeApproval?: boolean;
 }
 
 export interface AiRuntimeOptions {
@@ -86,6 +115,7 @@ export interface AiOptions {
   embedding?: EmbeddingOptions;
   rag?: RagOptions;
   store?: AiStoreOptions;
+  tools?: AiToolsOptions;
   mcp?: Partial<McpConfig>;
   guardrail?: GuardrailRuleSet & { rules?: GuardrailRuleSet };
   runtime?: AiRuntimeOptions;
@@ -96,6 +126,9 @@ export interface AiOptions {
 export interface BootstrapOptions {
   name?: string;
   homePage?: string;
+  port?: number;
+  host?: string;
+  shutdownHooks?: boolean;
   db?: unknown;
   apiSignVerify?: ApiSignVerifyOptions;
   agentConfig?: AgentConfigOptions;

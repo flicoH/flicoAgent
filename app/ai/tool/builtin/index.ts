@@ -1,5 +1,6 @@
 import type { BuiltinToolFactory } from '../tool.interface';
 import retrieveTool from './retrieve.tool';
+import serviceInvokeTool from './service-invoke.tool';
 
 /**
  * 框架内置工具工厂清单 (builtinTools)
@@ -11,4 +12,5 @@ import retrieveTool from './retrieve.tool';
  */
 export const builtinTools: BuiltinToolFactory[] = [
   retrieveTool,
+  serviceInvokeTool,
 ];

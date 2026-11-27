@@ -69,7 +69,69 @@ export interface ExecutionResult {
  * - 'final': 最终输出步骤
  * - 'guardrail': 安全护栏拦截步骤
  */
-export type StepType = 'plan' | 'skill' | 'tool' | 'observe' | 'final' | 'guardrail';
+export type StepType = 'plan' | 'skill' | 'tool' | 'observe' | 'final' | 'guardrail' | 'approval';
+
+export type RunStatus =
+  | 'queued'
+  | 'running'
+  | 'waiting_approval'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
+
+export interface RunFailure {
+  code: string;
+  message: string;
+}
+
+export interface PendingApproval {
+  id: string;
+  kind: 'skill' | 'tool';
+  name: string;
+  input: unknown;
+}
+
+export interface RunSummary {
+  runId: string;
+  agent: string;
+  threadId: string;
+  status: RunStatus;
+  createdAt: string;
+  updatedAt: string;
+  usage?: TokenUsage;
+  modelDurationMs?: number;
+  failure?: RunFailure;
+  approval?: PendingApproval;
+  parentRunId?: string;
+  rootRunId?: string;
+}
+
+export interface RunContinuation {
+  iteration: number;
+  maxIterations: number;
+  messages: LlmMessage[];
+  toolCalls: Array<{ id: string; name: string; args: unknown }>;
+  executionResults: ExecutionResult[];
+  pendingIndex: number;
+  pendingKind: 'skill' | 'tool';
+  pendingCallId: string;
+  taskPlan?: string[];
+  taskIndex?: number;
+  previousDraft?: string;
+  reflectionRevisions?: number;
+  checkpointUpdatedAt?: number;
+  checkpointId?: string;
+  threadEnabled?: boolean;
+  userInputText?: string;
+  budget?: {
+    remainingModelCalls: number;
+    maxDepth: number;
+    remainingChildRuns: number;
+    allowedAgents?: string[];
+  };
+  ancestry?: string[];
+}
 
 /** 模型供应商报告的单轮用量，或同一次运行中已上报用量的合计。 */
 export interface TokenUsage {
@@ -98,6 +160,8 @@ export interface Step {
   citations?: Citation[];
   /** 模型调用用量。null 表示本轮未上报，缺省表示步骤未记录模型调用。 */
   usage?: TokenUsage | null;
+  /** 本轮模型规划调用耗时（毫秒） */
+  modelDurationMs?: number;
   /** 步骤类型 */
   type: StepType;
   /** 所在循环轮次（从 1 开始递增） */
@@ -128,6 +192,14 @@ export interface Step {
  * 【重要】：runId、output、steps、threadId 字段名称在合同中严格锁死，不得变更
  */
 export interface RunResult {
+  /** 运行状态 */
+  status?: RunStatus;
+  /** 安全脱敏后的失败原因 */
+  failure?: RunFailure;
+  /** 待人工审批的调用信息 */
+  approval?: PendingApproval;
+  /** 本运行各次规划调用耗时之和（毫秒） */
+  modelDurationMs?: number;
   /** 本轮检索且最终回答引用的知识库切片。 */
   citations?: Citation[];
   /** 本次运行已记录的模型用量汇总 */
@@ -146,13 +218,17 @@ export interface RunResult {
 export interface AgentRunAccess {
   scope?: string;
   agents?: readonly string[];
+  skills?: readonly string[];
   ragRead?: boolean;
   ingest?: boolean;
+  approve?: boolean;
 }
 
 /** 持久化存储的完整运行链路。 */
 export interface TraceRun extends RunResult {
   scope?: string;
+  workerId?: string;
+  continuation?: RunContinuation;
   parentRunId?: string;
   rootRunId?: string;
   delegationDepth?: number;
@@ -169,12 +245,18 @@ export interface TraceRun extends RunResult {
 /**
  * 运行时旁路事件 (RuntimeEvent)
  * 用于在流式接口 (SSE) 中向客户端实时推送状态：
+ * - start: 运行已启动并分配 runId
  * - delta: 字符或词级别的内容流式增量
+ * - delta_reset: 清空当前轮临时文本增量（模型转为工具调用）
  * - step: 步骤完成事件（通知客户端当前处于哪个 plan/tool/final 阶段）
+ * - status: 异步运行状态变更事件
  */
 export type RuntimeEvent =
+  | { type: 'start'; runId: string }
   | { type: 'delta'; content: string }
-  | { type: 'step'; step: Step };
+  | { type: 'delta_reset' }
+  | { type: 'step'; step: Step; sequence?: number }
+  | { type: 'status'; status: RunStatus; approval?: PendingApproval; failure?: RunFailure };
 
 /**
  * 大模型 Function Calling（工具调用）单项结构
@@ -261,6 +343,8 @@ export interface LlmChatOptions {
   tools?: unknown[];
   /** 是否启用流式输出：true 时返回 AsyncIterable<string>，false 时返回 Promise<LlmChatResult> */
   stream?: boolean;
+  /** 用于取消上游模型请求的中止信号 */
+  signal?: AbortSignal;
 }
 
 /**

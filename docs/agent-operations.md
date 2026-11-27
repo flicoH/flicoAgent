@@ -175,3 +175,66 @@ npx flico-agent-eval --suite ./eval/cases.json --url http://localhost:8080 --out
 | `30` | 无法将 JSON 报告写入指定文件或标准输出。 |
 
 业务代码可以从 `@flicoh/agent/eval` 导入 `parseSuite` 和 `runSuite`，并向 `runSuite` 提供接收 `{ agent, input, threadId }`、返回 `{ status, body }` 的异步请求函数。
+
+## 多实例生产存储与分布式防重放
+
+默认文件存储（`FileTraceStore`、`FileMemoryStore`）与内存 Nonce 表（`InMemoryNonceStore`）适用于单实例部署。多副本水平扩展时，可切换为内置的 **MySQL** 或 **Redis** 驱动，或通过 `use` 注入自定义实例/工厂：
+
+| 配置项 | 可选 `driver` | 能力说明 |
+| --- | --- | --- |
+| `ai.store.trace` | `file`（默认）、`mysql`、`redis` | 持久化运行状态、步骤、用量、审批快照，并支持按 `scope` 与 `agents` 分页列表 |
+| `ai.store.memory` | `file`（默认）、`mysql`、`redis` | 持久化多轮对话检查点；`mysql` 使用 `GET_LOCK`、`redis` 使用 `SET NX PX` + Lua 解锁实现跨实例 `runTurn` 串行锁 |
+| `ai.access.nonceStore` | `memory`（默认）、`mysql`、`redis` | 原子消费 HMAC 请求 `x-agent-nonce`，跨实例防止签名重放 |
+
+### MySQL 多实例配置
+
+对 MySQL 数据库执行 [建表脚本](p0-store-mysql.sql) 创建 `flico_ai_traces`、`flico_ai_memory` 和 `flico_ai_nonces` 三张表，并复用框架的 `db` 连接配置：
+
+```js
+module.exports = {
+  db: {
+    client: 'mysql2',
+    connection: {
+      host: process.env.DB_HOST,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      database: process.env.DB_NAME,
+    },
+  },
+  ai: {
+    access: {
+      nonceStore: { driver: 'mysql', namespace: 'prod' },
+    },
+    store: {
+      trace: { driver: 'mysql', namespace: 'prod' },
+      memory: { driver: 'mysql', namespace: 'prod', lockTimeoutSeconds: 30 },
+    },
+  },
+};
+```
+
+### Redis 多实例配置
+
+框架通过最小接口 `RedisLikeClient`（`get`、`set`、`del` 及可选 `eval`、`zadd`、`zrevrange`、`expire`）兼容 `ioredis` / `node-redis`，业务工程直接传入已创建的客户端实例即可，无需强绑框架依赖版本：
+
+```js
+const Redis = require('ioredis');
+const redis = new Redis(process.env.REDIS_URL);
+
+module.exports = {
+  ai: {
+    access: {
+      nonceStore: { driver: 'redis', namespace: 'prod', client: redis },
+    },
+    store: {
+      trace: { driver: 'redis', namespace: 'prod', ttlMs: 7 * 24 * 3600 * 1000, client: redis },
+      memory: { driver: 'redis', namespace: 'prod', lockTtlMs: 60_000, lockTimeoutMs: 30_000, client: redis },
+    },
+  },
+};
+```
+
+## 服务端口与优雅停机
+
+- 监听端口按以下优先级解析：`serverStart({ port })` > 配置文件 `port` > 环境变量 `PORT` > 默认 `8080`；同时支持可选 `host`。
+- `bootstrap()` 默认启用 Nest 优雅停机钩子（`enableShutdownHooks()`），收到 `SIGTERM`/`SIGINT` 时自动关闭 MCP 子进程并释放数据库连接池。如需自定义停机流程，可传入 `shutdownHooks: false`。

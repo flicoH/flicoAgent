@@ -2,12 +2,12 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { agentModule } = require('../../dist/agent.module');
+const { ElpisModule } = require('../../dist/elpis.module');
 const { FallbackModule } = require('../../dist/modules/fallback/fallback.module');
 const { FallbackController } = require('../../dist/modules/fallback/fallback.controller');
 
 describe('business module wiring', () => {
-  it('agentModule.register 扫描业务 dist 模块且 FallbackModule 最后', () => {
+  it('ElpisModule.register 扫描业务 dist 模块且 FallbackModule 最后', () => {
     const originalCwd = process.cwd();
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-modules-'));
     try {
@@ -18,7 +18,7 @@ describe('business module wiring', () => {
       fs.writeFileSync(path.join(modules, 'fixture.module.js'),
         `class FixtureModule {}; require(${nest}).Module({ providers: [] })(FixtureModule); module.exports = { FixtureModule };`);
       process.chdir(fixture);
-      const imports = agentModule.register().imports;
+      const imports = ElpisModule.register().imports;
       assert.deepStrictEqual(
         imports.map(item => item.name),
         ['AiModule', 'ExtendModule', 'ProjectModule', 'ViewModule', 'FixtureModule', 'FallbackModule'],
@@ -32,10 +32,10 @@ describe('business module wiring', () => {
 
   it('框架 cwd 不扫描自身 dist/modules，源码不硬编码业务模块', () => {
     assert.deepStrictEqual(
-      agentModule.register().imports.map(item => item.name),
+      ElpisModule.register().imports.map(item => item.name),
       ['AiModule', 'ExtendModule', 'ProjectModule', 'ViewModule', 'FallbackModule'],
     );
-    const source = fs.readFileSync(path.resolve(__dirname, '../../app/agent.module.ts'), 'utf8');
+    const source = fs.readFileSync(path.resolve(__dirname, '../../app/elpis.module.ts'), 'utf8');
     for (const forbidden of ['loadDemoModule', 'AuthModule', 'UserModule', 'ProductModule', 'HealthModule']) {
       assert.strictEqual(source.includes(forbidden), false);
     }

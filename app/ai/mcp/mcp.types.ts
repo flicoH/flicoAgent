@@ -26,6 +26,8 @@ export interface McpServerConfig {
   url?: string;
   /** 传递给远程服务的自定义请求头 */
   headers?: Record<string, string>;
+  /** 需要人工审批的工具名称列表 */
+  approvalTools?: string[];
 }
 
 /**

@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { ChatOpenAI } from '@langchain/openai';
 import {
   AIMessage,
+  AIMessageChunk,
   BaseMessage,
   HumanMessage,
   SystemMessage,
@@ -45,9 +46,24 @@ export interface LangChainPlanResult {
   planner: 'langchain';
 }
 
+export interface LangChainPlanOptions {
+  model?: string;
+  signal?: AbortSignal;
+  onDelta?: (content: string) => void | Promise<void>;
+  resetDelta?: () => void | Promise<void>;
+}
+
 /**
- * 针对不支持原生 Function Calling 的模型或旧版模型的 JSON 兜底结构
+ * 执行单轮决策规划
+ *
+ * @param messages 当前完整的多轮消息历史
+ * @param tools 开放调用的 StructuredTool 列表
+ * @param options 可选配置（模型覆盖、AbortSignal、流式 delta 与 resetDelta 回调）
+ * @returns LangChainPlanResult（包含 toolCalls 或 finalAnswer，以及 planner='langchain'）
  */
+export interface LangChainPlanResultWithStream extends LangChainPlanResult {
+  streamed?: boolean;
+}
 interface JsonPlan {
   /** 动作标识：'call' | 'invoke' | 'tool' | 'skill' | 'final' */
   action?: string;
@@ -209,11 +225,15 @@ export class LangChainPlannerService {
   async plan(
     messages: LlmMessage[],
     tools: StructuredTool[],
-    options: { model?: string } = {},
+    options: LangChainPlanOptions = {},
   ): Promise<LangChainPlanResult> {
+    if (options.signal?.aborted) {
+      throw new Error('Planner invocation aborted');
+    }
+
     const resolved = resolveLlm(this.config, options.model);
     if (resolved.kind === 'custom') {
-      return this.planWithProvider(resolved.provider, messages, tools);
+      return this.planWithProvider(resolved.provider, messages, tools, options);
     }
 
     // 1. 转换消息为 LangChain 标准消息体系
@@ -221,10 +241,49 @@ export class LangChainPlannerService {
     // 2. 绑定工具并触发模型推理
     const boundModel = this.bindTools(tools, resolved.model);
 
-    let rawResponse: unknown;
+    let aiMessage: AIMessage;
+    let emittedDelta = false;
+    let didResetDelta = false;
+    const callConfig = options.signal ? { signal: options.signal } : undefined;
+
     try {
-      rawResponse = await boundModel.invoke(lcMessages);
+      if (options.onDelta && typeof (boundModel as { stream?: unknown }).stream === 'function') {
+        const stream = await (boundModel as {
+          stream: (input: BaseMessage[], config?: { signal?: AbortSignal }) => Promise<AsyncIterable<AIMessageChunk>> | AsyncIterable<AIMessageChunk>;
+        }).stream(lcMessages, callConfig);
+        let aggregated: AIMessageChunk | undefined;
+        let sawToolCalls = false;
+
+        for await (const chunk of stream) {
+          if (options.signal?.aborted) {
+            throw new Error('Planner stream aborted');
+          }
+          aggregated = aggregated ? aggregated.concat(chunk) : chunk;
+          const hasChunkToolCalls = (Array.isArray(chunk.tool_call_chunks) && chunk.tool_call_chunks.length > 0)
+            || (Array.isArray(chunk.tool_calls) && chunk.tool_calls.length > 0)
+            || this.extractAdditionalToolCalls(chunk as unknown as AIMessage).length > 0;
+          if (hasChunkToolCalls) {
+            sawToolCalls = true;
+            if (emittedDelta && !didResetDelta) {
+              didResetDelta = true;
+              await options.resetDelta?.();
+            }
+          } else if (!sawToolCalls) {
+            const text = this.extractDeltaChunkText(chunk.content);
+            if (text) {
+              emittedDelta = true;
+              await options.onDelta(text);
+            }
+          }
+        }
+        aiMessage = (aggregated ?? new AIMessage('')) as unknown as AIMessage;
+      } else {
+        aiMessage = (await boundModel.invoke(lcMessages, callConfig)) as AIMessage;
+      }
     } catch (err: unknown) {
+      if (options.signal?.aborted) {
+        throw err;
+      }
       const error = err as Error;
       const targetEndpoint = resolved.model.clientConfig.baseURL || 'https://api.openai.com/v1';
 
@@ -236,7 +295,6 @@ export class LangChainPlannerService {
       throw planError;
     }
 
-    const aiMessage = rawResponse as AIMessage;
     // 读取模型供应商上报的实际用量，保留到规划结果中。
     const metadata = aiMessage.usage_metadata;
     const usage = metadata && {
@@ -251,6 +309,10 @@ export class LangChainPlannerService {
       : this.extractAdditionalToolCalls(aiMessage);
 
     if (Array.isArray(rawToolCalls) && rawToolCalls.length > 0) {
+      if (emittedDelta && !didResetDelta) {
+        didResetDelta = true;
+        await options.resetDelta?.();
+      }
       return { ...this.handleNativeToolCalls(rawToolCalls, aiMessage.content), usage };
     }
 
@@ -258,6 +320,10 @@ export class LangChainPlannerService {
     const content = this.extractContentString(aiMessage.content);
     const fallbackResult = this.parseJsonFallback(content);
     if (fallbackResult) {
+      if (fallbackResult.toolCalls?.length && emittedDelta && !didResetDelta) {
+        didResetDelta = true;
+        await options.resetDelta?.();
+      }
       return { ...fallbackResult, usage };
     }
 
@@ -270,12 +336,31 @@ export class LangChainPlannerService {
     };
   }
 
+  private extractDeltaChunkText(content: unknown): string {
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (Array.isArray(content)) {
+      return content
+        .map(part => (typeof part === 'string'
+          ? part
+          : (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string'
+            ? (part as { text: string }).text
+            : '')))
+        .join('');
+    }
+    return '';
+  }
+
   private async planWithProvider(
     provider: LlmProvider,
     messages: LlmMessage[],
     tools: StructuredTool[],
+    options: LangChainPlanOptions = {},
   ): Promise<LangChainPlanResult> {
     const result = await provider.chat(messages, {
+      model: options.model,
+      signal: options.signal,
       tools: tools.map((tool) => ({
         type: 'function',
         function: {

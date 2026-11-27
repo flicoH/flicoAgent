@@ -35,9 +35,10 @@ export interface ToolDefinition {
    * 执行该工具的具体逻辑
    *
    * @param input 模型规划器解析生成的结构化入参
+   * @param ctx 可选执行上下文（如 runId、signal、idempotencyKey）
    * @returns 工具执行后产出的可序列化结果
    */
-  execute(input: unknown): Promise<unknown>;
+  execute(input: unknown, ctx?: Record<string, unknown>): Promise<unknown>;
 
   /**
    * 标记该工具的来源分类
