@@ -188,7 +188,7 @@ npx flico-agent-eval --suite ./eval/cases.json --url http://localhost:8080 --out
 
 ### MySQL 多实例配置
 
-对 MySQL 数据库执行 [建表脚本](p0-store-mysql.sql) 创建 `flico_ai_traces`、`flico_ai_memory` 和 `flico_ai_nonces` 三张表，并复用框架的 `db` 连接配置：
+对 MySQL 数据库执行 [建表脚本](ai-store-mysql.sql) 创建 `flico_ai_traces`、`flico_ai_memory` 和 `flico_ai_nonces` 三张表，并复用框架的 `db` 连接配置：
 
 ```js
 module.exports = {
