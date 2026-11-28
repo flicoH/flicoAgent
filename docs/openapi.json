@@ -863,6 +863,7 @@
           "runId": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$"},
           "threadId": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,128}$"},
           "output": {"type": "string"},
+          "structuredOutput": {},
           "steps": {"type": "array", "items": {"$ref": "#/components/schemas/Step"}}
         },
         "required": ["runId", "threadId", "output", "steps"]
@@ -902,7 +903,7 @@
           "modelDurationMs": {"type": "integer", "minimum": 0},
           "toolCallId": {"type": "string"},
           "timestamp": {"type": "string", "format": "date-time"},
-          "node": {"enum": ["plan", "execute", "observe", "make-plan", "synthesize", "review"]},
+          "node": {"enum": ["plan", "execute", "observe", "make-plan", "synthesize", "review", "validate-output"]},
           "planner": {"const": "langchain"}
         },
         "required": ["type", "iteration", "timestamp"]
@@ -967,7 +968,9 @@
           "temperature": {"type": "number", "minimum": 0},
           "maxTokens": {"type": "integer", "minimum": 1},
           "topP": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
-          "timeoutMs": {"type": "integer", "minimum": 1}
+          "timeoutMs": {"type": "integer", "minimum": 1},
+          "outputSchema": {"type": "object"},
+          "maxOutputRetries": {"type": "integer", "minimum": 0, "default": 2}
         },
         "required": ["name", "skills", "tools"]
       },

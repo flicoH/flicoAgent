@@ -60,5 +60,7 @@ export { RedisTraceStore, RedisMemoryStore } from './ai/store/reference/redis-st
 export { CapabilityApprovalRequired, CapabilityInputInvalid } from './ai/tool/executor.service';
 export type { LlmCircuitSnapshot } from './ai/runtime/internal/llm-circuit-breaker';
 export { LlmCircuitBreakerService, LlmCircuitOpenError } from './ai/runtime/internal/llm-circuit-breaker';
+export type { StructuredOutputValidationResult } from './ai/runtime/internal/structured-output';
+export { validateStructuredOutput } from './ai/runtime/internal/structured-output';
 export { RagModule } from './ai/rag/rag.module';
 export { RetrieverService } from './ai/rag/retriever.service';

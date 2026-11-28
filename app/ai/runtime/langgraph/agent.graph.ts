@@ -2,10 +2,15 @@ import { randomUUID } from 'node:crypto';
 import { END, START, StateGraph } from '@langchain/langgraph';
 import type { LlmGenerationOptions } from '../../../config/bootstrap-options';
 import type { AgentLoopMode } from '../../agent/agent.interface';
-import type { ExecutionResult, LlmFallbackEvent, LlmToolMessage } from '../../contracts';
+import type { ExecutionResult, LlmFallbackEvent, LlmMessage, LlmToolMessage } from '../../contracts';
 import { CapabilityApprovalRequired, ExecutorService } from '../../tool/executor.service';
 import { isTokenUsage } from '../../trace/token-usage';
 import { sanitizeLlmFallbackMessage } from '../internal/llm-circuit-breaker';
+import {
+  buildStructuredOutputRepairPrompt,
+  DEFAULT_MAX_OUTPUT_RETRIES,
+  validateStructuredOutput,
+} from '../internal/structured-output';
 import type {
   LangChainPlannerService,
   LangChainToolCall,
@@ -28,6 +33,8 @@ export interface AgentGraphDeps {
   agentModel?: string;
   agentFallbacks?: string[];
   agentLlmOptions?: LlmGenerationOptions;
+  outputSchema?: Record<string, unknown>;
+  maxOutputRetries?: number;
   mode?: AgentLoopMode;
   maxReflectionRevisions?: number;
   signal?: AbortSignal;
@@ -144,7 +151,7 @@ function createTextStage(
         ...(deps.agentFallbacks ? { fallbacks: deps.agentFallbacks } : {}),
         ...(deps.agentLlmOptions ?? {}),
         signal: deps.signal,
-        ...(node === 'synthesize' ? { onDelta: deps.onDelta, resetDelta: deps.resetDelta } : {}),
+        ...(node === 'synthesize' && !deps.outputSchema ? { onDelta: deps.onDelta, resetDelta: deps.resetDelta } : {}),
         onFallback: async (event) => {
           const fallbackStep = buildFallbackStep(node, iteration, event);
           fallbackSteps.push(fallbackStep);
@@ -171,7 +178,15 @@ function createTextStage(
       timestamp: new Date().toISOString(),
     };
     await deps.recordStep?.(step);
-    return { ...stage.update, iteration, steps: [...fallbackSteps, step] };
+    return {
+      ...stage.update,
+      ...(terminalError ? { outputValidationDone: true } : {}),
+      ...(node === 'synthesize' && deps.outputSchema && !terminalError
+        ? { messages: [...state.messages, result.response ?? { role: 'assistant', content: text }] }
+        : {}),
+      iteration,
+      steps: [...fallbackSteps, step],
+    };
   };
 }
 
@@ -335,7 +350,7 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
       return halted;
     }
 
-    const streamDeltas = !deps.mode || deps.mode === 'react';
+    const streamDeltas = !deps.outputSchema && (!deps.mode || deps.mode === 'react');
     const fallbackSteps: GraphStep[] = [];
     const startedAt = Date.now();
     const planResult = await deps.planner.plan(state.messages, state.tools, {
@@ -401,7 +416,7 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
 
     const executingTask = deps.mode === 'plan-and-execute';
     const nextMessages = [...state.messages];
-    if (planResult.response || executingTask || deps.mode === 'reflection') {
+    if (planResult.response || executingTask || deps.mode === 'reflection' || Boolean(deps.outputSchema)) {
       nextMessages.push(planResult.response ?? { role: 'assistant', content: finalOutput });
     }
 
@@ -529,6 +544,116 @@ export function createObserveNode(deps?: Partial<AgentGraphDeps>) {
   };
 }
 
+function createValidateOutputNode(deps: Partial<AgentGraphDeps>) {
+  const schema = deps.outputSchema!;
+  const maxRetries = deps.maxOutputRetries ?? DEFAULT_MAX_OUTPUT_RETRIES;
+
+  return async (state: AgentStateType): Promise<AgentStateUpdate> => {
+    throwIfAborted(deps.signal);
+    const rawOutput = state.finalAnswer ?? '';
+    const check = validateStructuredOutput(schema, rawOutput);
+
+    if (check.valid) {
+      return {
+        structuredOutput: check.value,
+        finalAnswer: check.serialized,
+        outputValidationDone: true,
+      };
+    }
+
+    if (state.outputRepairRetries >= maxRetries || !deps.planner) {
+      const error = {
+        code: 'INVALID_STRUCTURED_OUTPUT',
+        message: `Output failed outputSchema validation after ${state.outputRepairRetries} repair attempt(s): ${check.reason}`,
+      };
+      const finalStep: GraphStep = {
+        type: 'final',
+        node: 'validate-output',
+        iteration: state.iteration,
+        output: rawOutput,
+        error,
+        timestamp: new Date().toISOString(),
+      };
+      await deps.recordStep?.(finalStep);
+      return {
+        structuredOutput: undefined,
+        finalAnswer: rawOutput,
+        outputValidationDone: true,
+        steps: [finalStep],
+      };
+    }
+
+    const observeStep: GraphStep = {
+      type: 'observe',
+      node: 'validate-output',
+      iteration: state.iteration,
+      name: 'output-schema',
+      output: { retry: state.outputRepairRetries + 1, maxRetries, reason: check.reason },
+      error: {
+        code: 'INVALID_STRUCTURED_OUTPUT',
+        message: check.reason,
+      },
+      timestamp: new Date().toISOString(),
+    };
+    await deps.recordStep?.(observeStep);
+
+    const halted = await startModelCall(state, deps, 'validate-output');
+    if (halted) {
+      const haltedSteps = Array.isArray(halted.steps) ? halted.steps : [];
+      return {
+        ...halted,
+        structuredOutput: undefined,
+        outputValidationDone: true,
+        steps: [observeStep, ...haltedSteps],
+      };
+    }
+
+    const iteration = state.iteration + 1;
+    const repairPrompt = buildStructuredOutputRepairPrompt(schema, check.reason);
+    const nextMessages: LlmMessage[] = [...state.messages, { role: 'user', content: repairPrompt }];
+    const fallbackSteps: GraphStep[] = [];
+    const startedAt = Date.now();
+    const result = await deps.planner.plan(nextMessages, [], {
+      model: deps.agentModel,
+      ...(deps.agentFallbacks ? { fallbacks: deps.agentFallbacks } : {}),
+      ...(deps.agentLlmOptions ?? {}),
+      signal: deps.signal,
+      onFallback: async (event) => {
+        const fallbackStep = buildFallbackStep('validate-output', iteration, event);
+        fallbackSteps.push(fallbackStep);
+        await deps.recordStep?.(fallbackStep);
+      },
+    });
+    const modelDurationMs = Math.max(0, Date.now() - startedAt);
+    throwIfAborted(deps.signal);
+
+    const repairedText = result.toolCalls?.length ? '' : (result.finalAnswer ?? '');
+    const usage = isTokenUsage(result.usage) ? result.usage : null;
+    const repairStep: GraphStep = {
+      type: 'plan',
+      node: 'validate-output',
+      planner: 'langchain',
+      iteration,
+      ...(result.model ? { model: result.model } : {}),
+      output: { type: 'final', output: repairedText },
+      usage,
+      modelDurationMs,
+      timestamp: new Date().toISOString(),
+    };
+    await deps.recordStep?.(repairStep);
+
+    const assistantMsg: LlmMessage = result.response ?? { role: 'assistant', content: repairedText };
+    return {
+      iteration,
+      messages: [...nextMessages, assistantMsg],
+      finalAnswer: repairedText,
+      outputRepairRetries: state.outputRepairRetries + 1,
+      outputValidationDone: false,
+      steps: [observeStep, ...fallbackSteps, repairStep],
+    };
+  };
+}
+
 export function routeAfterPlan(state: AgentStateType): string {
   if (state.finalAnswer !== undefined) {
     return END;
@@ -541,6 +666,66 @@ function routeAfterExecute(state: AgentStateType): string {
 }
 
 export function createAgentGraph(deps?: Partial<AgentGraphDeps>) {
+  const hasOutputSchema = Boolean(deps?.outputSchema);
+  const finishTarget = (state: AgentStateType): 'validate-output' | typeof END => (
+    !state.isMaxIterationError && !state.outputValidationDone ? 'validate-output' : END
+  );
+
+  if (hasOutputSchema) {
+    const validatedGraph = new StateGraph(AgentStateAnnotation)
+      .addNode('plan', createPlanNode(deps))
+      .addNode('execute', createExecuteNode(deps))
+      .addNode('observe', createObserveNode(deps))
+      .addNode('validate-output', createValidateOutputNode(deps!))
+      .addConditionalEdges('execute', routeAfterExecute, { observe: 'observe', [END]: END })
+      .addEdge('observe', 'plan')
+      .addConditionalEdges(
+        'validate-output',
+        state => (state.outputValidationDone || state.isMaxIterationError ? END : 'validate-output'),
+        { 'validate-output': 'validate-output', [END]: END },
+      );
+
+    if (deps?.mode === 'plan-and-execute') {
+      return validatedGraph
+        .addNode('make-plan', createTaskPlanningNode(deps))
+        .addNode('synthesize', createSynthesisNode(deps))
+        .addEdge(START, deps.startFromExecute ? 'execute' : 'make-plan')
+        .addConditionalEdges('make-plan', state => (state.finalAnswer !== undefined ? END : 'plan'), [END, 'plan'])
+        .addConditionalEdges('plan', state => {
+          if (state.finalAnswer !== undefined) return END;
+          if (state.toolCalls?.length) return 'execute';
+          return state.taskIndex < state.taskPlan.length ? 'plan' : 'synthesize';
+        }, [END, 'execute', 'plan', 'synthesize'])
+        .addConditionalEdges('synthesize', finishTarget, { 'validate-output': 'validate-output', [END]: END })
+        .compile();
+    }
+
+    if (deps?.mode === 'reflection') {
+      return validatedGraph
+        .addNode('review', createReviewNode(deps))
+        .addEdge(START, deps.startFromExecute ? 'execute' : 'plan')
+        .addConditionalEdges('plan', state => {
+          if (state.isMaxIterationError) return END;
+          return state.finalAnswer !== undefined ? 'review' : 'execute';
+        }, [END, 'review', 'execute'])
+        .addConditionalEdges(
+          'review',
+          state => (state.finalAnswer !== undefined ? finishTarget(state) : 'plan'),
+          [END, 'plan', 'validate-output'],
+        )
+        .compile();
+    }
+
+    return validatedGraph
+      .addEdge(START, deps?.startFromExecute ? 'execute' : 'plan')
+      .addConditionalEdges(
+        'plan',
+        state => (state.finalAnswer !== undefined ? finishTarget(state) : 'execute'),
+        { execute: 'execute', 'validate-output': 'validate-output', [END]: END },
+      )
+      .compile();
+  }
+
   const graph = new StateGraph(AgentStateAnnotation)
     .addNode('plan', createPlanNode(deps))
     .addNode('execute', createExecuteNode(deps))
@@ -553,7 +738,7 @@ export function createAgentGraph(deps?: Partial<AgentGraphDeps>) {
       .addNode('make-plan', createTaskPlanningNode(deps))
       .addNode('synthesize', createSynthesisNode(deps))
       .addEdge(START, deps.startFromExecute ? 'execute' : 'make-plan')
-      .addConditionalEdges('make-plan', state => state.finalAnswer !== undefined ? END : 'plan', [END, 'plan'])
+      .addConditionalEdges('make-plan', state => (state.finalAnswer !== undefined ? END : 'plan'), [END, 'plan'])
       .addConditionalEdges('plan', state => {
         if (state.finalAnswer !== undefined) return END;
         if (state.toolCalls?.length) return 'execute';
@@ -571,7 +756,7 @@ export function createAgentGraph(deps?: Partial<AgentGraphDeps>) {
         if (state.isMaxIterationError) return END;
         return state.finalAnswer !== undefined ? 'review' : 'execute';
       }, [END, 'review', 'execute'])
-      .addConditionalEdges('review', state => state.finalAnswer !== undefined ? END : 'plan', [END, 'plan'])
+      .addConditionalEdges('review', state => (state.finalAnswer !== undefined ? END : 'plan'), [END, 'plan'])
       .compile();
   }
 

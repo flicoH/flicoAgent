@@ -12,7 +12,7 @@ flicoAgent 是一个基于 NestJS 的应用框架内核，提供项目配置、�
 - 基于 `_ENV` 或 `__ENV` 加载环境配置
 - 自动加载业务工程 `dist/modules/**/*.module.js`、`dist/skills/**/*.skill.js` 和 `dist/agents/**/*.agent.js`
 - Vue 3 + Vite 多页面构建及 Nunjucks 页面模板
-- 可配置的 OpenAI 兼容 LLM（支持推理参数、主备模型 Fallback 与熔断）、Embedding、MCP 工具、RAG、Guardrail、Memory 与 Trace
+- 可配置的 OpenAI 兼容 LLM（支持推理参数、主备模型 Fallback 与熔断）、Agent 结构化输出（`outputSchema`）、Embedding、MCP 工具、RAG、Guardrail、Memory 与 Trace
 - 内置文件型 Trace、Memory 和 Vector 存储实现
 - `flico-agent-eval` 离线回归评测，提供 JSON 报告和 CI 退出码
 
@@ -257,6 +257,10 @@ export default {
 `maxReflectionRevisions` 默认是 `1`，设为 `0` 时只审阅一次。若审阅未通过且已达到修订上限，返回最后一份草稿，审阅步骤记录 `REFLECTION_LIMIT`。Plan-and-Execute 在本次运行中按初次生成的步骤执行。独立的规划、审阅和汇总阶段没有工具执行权限。
 
 所有模型阶段均计入 `ai.runtime.maxIterations`，有委派时还计入运行树共享模型预算。Reflection 若要完成一次修订并再次审阅，至少需要四次模型调用，工具调用可能增加所需轮次。子 Agent 使用自己的 `mode`。同步和 SSE 接口仍按 Agent 名称发起运行，可以使用 `GET /api/ai/agent/graph?mode=reflection` 查看指定模式的拓扑。
+
+### 结构化输出（`outputSchema`）
+
+在 `AgentDefinition` 中声明 `outputSchema`（JSON Schema）与可选 `maxOutputRetries`（默认 `2`）后，框架会在提示词中自动注入结构约束、使用 `ajv` 严格校验最终输出 JSON，并在格式不合法时自动触发有限次纠错重试。校验通过后，同步接口、SSE `done` 与 Trace 会同时返回规范化的 JSON 字符串 `output` 与可直接消费的 `structuredOutput`；超出重试上限时在终态步骤记录 `INVALID_STRUCTURED_OUTPUT`。完整示例见 [Agent 结构化输出](docs/agent-operations.md#agent-结构化输出outputschema)。
 
 ### 多 Agent 委派
 

@@ -80,6 +80,16 @@ export interface AgentDefinition {
   /** timeoutMs 的别名 */
   timeout?: number;
 
+  /**
+   * 结构化输出 JSON Schema 约束。
+   * 声明后框架会在提示词注入结构要求、使用 ajv 校验最终输出 JSON，
+   * 并在格式不合法时触发最多 maxOutputRetries 次自动纠错重试，成功时返回 structuredOutput。
+   */
+  outputSchema?: Record<string, unknown>;
+
+  /** 结构化输出校验失败时的最大自动纠错重试次数，默认 2（设为 0 表示仅校验不重试）。 */
+  maxOutputRetries?: number;
+
   /** 当前 Agent 可直接委派的 Agent 注册名。 */
   delegates?: string[];
 

@@ -247,6 +247,8 @@ export interface RunResult {
   runId: string;
   /** Agent 产出的最终文本结论 */
   output: string;
+  /** 当 Agent 声明 outputSchema 且校验通过时，返回可直接消费的结构化 JSON 对象/值 */
+  structuredOutput?: unknown;
   /** 完整的按发生时序排列的执行步骤列表 */
   steps: Step[];
   /** 所属多轮会话线程 ID */

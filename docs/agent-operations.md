@@ -297,3 +297,32 @@ module.exports = {
 - **切备触发条件**：仅针对瞬态故障（HTTP `429`、HTTP `5xx`、HTTP `408`/超时、网络断连以及 `circuit_open`）自动切换至下一个备用模型；调用方取消（`AbortSignal`）和非瞬态 `4xx`（如 `400`/`401`/`403`/`422`）直接返回错误，不切备也不计入熔断。
 - **流式一致性**：`POST /api/ai/agent/run/stream` 与 `POST /api/ai/chat/stream` 在主模型流式输出中途失败切备前，会自动发送 `delta_reset` SSE 事件通知前端清空临时半截文本，再推送备模型的完整输出。
 - **Trace 切换记录**：每次发生切备或因熔断跳过主模型时，Trace 中会持久化一条脱敏的 `type: "fallback"` 步骤（含 `name: "<from>-><to>"`、`model`、`output: { fromModel, toModel, reason, statusCode?, circuitState?, attempt }` 与安全 `error`），同时在后续成功的 `plan` 步骤上标注实际执行的 `model` 字段。未发生切换时不产生额外步骤。
+
+## Agent 结构化输出（`outputSchema`）
+
+在业务 Agent 声明中配置 `outputSchema`（JSON Schema）后，框架会自动注入结构化输出提示词、提取并校验最终 JSON，在格式不合法时触发最多 `maxOutputRetries`（默认 `2`，设为 `0` 仅校验不重试）次自动纠错重试：
+
+```ts
+import type { AgentDefinition } from '@flicoh/agent';
+
+export default {
+  name: 'ticket-classifier',
+  skills: [],
+  tools: [],
+  outputSchema: {
+    type: 'object',
+    properties: {
+      category: { type: 'string', enum: ['billing', 'technical', 'other'] },
+      priority: { type: 'integer', minimum: 1, maximum: 5 },
+      summary: { type: 'string', minLength: 1 },
+    },
+    required: ['category', 'priority', 'summary'],
+    additionalProperties: false,
+  },
+  maxOutputRetries: 2,
+} satisfies AgentDefinition;
+```
+
+- **结果返回**：校验通过后，同步接口、`POST /api/ai/agent/run/stream` 的 `done` 事件、Trace 及运行详情同时返回规范 JSON 字符串 `output` 与已解析对象 `structuredOutput`。
+- **失败保护**：达到重试上限或模型调用预算仍未通过校验时，不会返回非法 `structuredOutput`，并在终态 `final` 步骤（`node: "validate-output"`）记录 `error.code = "INVALID_STRUCTURED_OUTPUT"`。
+- **流式与模式兼容**：统一覆盖 `react`、`plan-and-execute` 与 `reflection` 三种模式；校验通过前不会向 SSE 提前推送未校验或带 Markdown 代码块围栏的临时 `delta`。

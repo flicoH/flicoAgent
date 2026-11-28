@@ -4,7 +4,7 @@ import type { ExecutionResult, LlmMessage, Step } from '../../contracts';
 import type { LangChainToolCall } from '../langchain/langchain-planner.service';
 
 export interface GraphStep extends Step {
-  node?: 'plan' | 'execute' | 'observe' | 'make-plan' | 'synthesize' | 'review';
+  node?: 'plan' | 'execute' | 'observe' | 'make-plan' | 'synthesize' | 'review' | 'validate-output';
   planner?: 'langchain';
   [key: string]: unknown;
 }
@@ -78,6 +78,18 @@ export const AgentStateAnnotation = Annotation.Root({
   finalAnswer: Annotation<string | undefined>({
     reducer: (_x, y) => y,
     default: () => undefined,
+  }),
+  structuredOutput: Annotation<unknown>({
+    reducer: (_previous, next) => next,
+    default: () => undefined,
+  }),
+  outputRepairRetries: Annotation<number>({
+    reducer: (_previous, next) => next,
+    default: () => 0,
+  }),
+  outputValidationDone: Annotation<boolean>({
+    reducer: (_previous, next) => next,
+    default: () => false,
   }),
   isMaxIterationError: Annotation<boolean>({
     reducer: (x, y) => (y !== undefined ? y : x),

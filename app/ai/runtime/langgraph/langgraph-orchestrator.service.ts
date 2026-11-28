@@ -38,6 +38,7 @@ import { ToolRegistryService } from '../../tool/tool-registry.service';
 import { summarizeTokenUsage } from '../../trace/token-usage';
 import { TraceService } from '../../trace/trace.service';
 import { resolveMaxIterations } from '../internal/load-runtime-config';
+import { buildStructuredOutputInstruction } from '../internal/structured-output';
 import { LangChainPlannerService } from '../langchain/langchain-planner.service';
 import { AdaptedStructuredTool, SkillToolAdapter } from '../langchain/skill-tool.adapter';
 import { createAgentGraph, defaultAgentGraph } from './agent.graph';
@@ -581,9 +582,11 @@ export class LangGraphOrchestratorService {
     const userInputText = this.normalizeInputText(input);
     const retrieveTool = resolveRagOptions(this.config).tool.name || 'retrieve';
     const citationInstructions = '使用知识库片段作为依据时，在对应的正文陈述后原样插入该片段的 citation 标记。只引用本轮检索且用于回答的证据。';
-    const prompt = agent.tools.includes(retrieveTool)
-      ? [agent.prompt, citationInstructions].filter(Boolean).join('\n\n')
-      : agent.prompt;
+    const promptParts: string[] = [];
+    if (agent.prompt) promptParts.push(agent.prompt);
+    if (agent.tools.includes(retrieveTool)) promptParts.push(citationInstructions);
+    if (agent.outputSchema) promptParts.push(buildStructuredOutputInstruction(agent.outputSchema));
+    const prompt = promptParts.length ? promptParts.join('\n\n') : undefined;
     const messages = this.buildInitialMessages(prompt, contextMessages, userInputText);
     const maxIterations = resolveMaxIterations(this.config);
 
@@ -731,6 +734,8 @@ export class LangGraphOrchestratorService {
       agentModel: agent.model,
       agentFallbacks: agent.fallbacks,
       ...(Object.keys(agentLlmOptions).length ? { agentLlmOptions } : {}),
+      ...(agent.outputSchema ? { outputSchema: agent.outputSchema } : {}),
+      ...(agent.maxOutputRetries !== undefined ? { maxOutputRetries: agent.maxOutputRetries } : {}),
       mode: agent.mode,
       maxReflectionRevisions: agent.maxReflectionRevisions,
       signal,
@@ -863,9 +868,12 @@ export class LangGraphOrchestratorService {
 
     const usage = summarizeTokenUsage(steps);
     const modelDurationMs = summarizeModelDuration(steps);
+    const hasStructuredOutput = finalState.structuredOutput !== undefined;
     const saved = await this.trace.updateRun(run.runId, (record) => {
       record.status = 'succeeded';
       record.output = finalOutput;
+      if (hasStructuredOutput) record.structuredOutput = finalState.structuredOutput;
+      else delete record.structuredOutput;
       record.modelDurationMs = modelDurationMs;
       if (usage) record.usage = usage;
       if (citations.length) record.citations = citations;
@@ -882,6 +890,7 @@ export class LangGraphOrchestratorService {
       runId: run.runId,
       status: 'succeeded',
       output: finalOutput,
+      ...(hasStructuredOutput ? { structuredOutput: finalState.structuredOutput } : {}),
       steps,
       threadId: run.threadId,
       ...(usage ? { usage } : {}),
