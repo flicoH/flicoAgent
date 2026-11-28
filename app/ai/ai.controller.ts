@@ -2,9 +2,13 @@ import {
   BadRequestException,
   Body,
   Controller,
+  ForbiddenException,
   Get,
+  HttpCode,
   HttpException,
   HttpStatus,
+  NotFoundException,
+  Optional,
   Param,
   Post,
   Query,
@@ -15,88 +19,248 @@ import type { Request, Response } from 'express';
 import { ConfigService } from '../config/config.service';
 import { isAgentLoopMode } from './agent/agent.interface';
 import { AgentScannerService } from './agent/agent-scanner.service';
+import {
+  AgentConfigResponse,
+  AgentRunAccess,
+  LlmChatResult,
+  LlmMessage,
+  RunResult,
+  RuntimeEvent,
+} from './contracts';
 import { resolveGuardrailRuleSet } from './guardrail/internal/load-guardrail-config';
 import { resolveMemoryMaxTurns, resolveThreadEnabled } from './memory/internal/load-memory-config';
 import { resolveRagOptions } from './rag/internal/load-rag-config';
+import {
+  readLlmConfig,
+  resolveCircuitBreakerConfig,
+  resolveLlm,
+  resolveLlmCandidates,
+} from './runtime/internal/load-llm-config';
 import { resolveMaxIterations } from './runtime/internal/load-runtime-config';
-import { LangGraphOrchestratorService } from './runtime/langgraph/langgraph-orchestrator.service';
-import { AgentConfigResponse, AgentRunAccess, RunResult, RuntimeEvent } from './contracts';
+import {
+  LangChainPlannerService,
+  toLangChainMessages,
+} from './runtime/langchain/langchain-planner.service';
+import {
+  LangGraphOrchestratorService,
+  toPublicRunDetail,
+} from './runtime/langgraph/langgraph-orchestrator.service';
+import { SkillScannerService } from './skill/skill-scanner.service';
+import {
+  CapabilityApprovalRequired,
+  CapabilityInputInvalid,
+  ExecutorService,
+} from './tool/executor.service';
 import { ToolRegistryService } from './tool/tool-registry.service';
 import { TraceService } from './trace/trace.service';
 
-/**
- * Agent 运行通用请求体定义
- */
+const ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const SSE_HEARTBEAT_MS = 15_000;
+
 interface AgentRunRequest {
-  /** 目标 Agent 的唯一注册名称 */
-  agent: string;
-  /** 初始输入内容（提问或参数对象） */
-  input: unknown;
-  /** 可选会话线程 ID，支持多轮上下文关联 */
-  threadId?: string;
+  agent?: unknown;
+  input?: unknown;
+  threadId?: unknown;
 }
 
-/**
- * 校验并提取 Agent 运行请求参数
- *
- * @param body 请求体数据
- * @returns 规范化的 AgentRunRequest
- * @throws 当 agent 缺失或为空字符串时抛出 BadRequestException
- */
-function resolveAgentRun(body: AgentRunRequest): AgentRunRequest {
-  if (!body || typeof body.agent !== 'string' || !body.agent.trim()) {
+interface ChatRequest {
+  message?: unknown;
+  messages?: unknown;
+  model?: unknown;
+  tools?: unknown;
+}
+
+interface ApprovalDecisionRequest {
+  approvalId?: unknown;
+  approved?: unknown;
+}
+
+function resolveAgentRun(body: AgentRunRequest): { agent: string; input: unknown; threadId?: string } {
+  if (!body || typeof body !== 'object' || typeof body.agent !== 'string' || !body.agent.trim() || body.agent.trim().length > 128) {
     throw new BadRequestException('agent is required');
   }
-  const threadId = typeof body.threadId === 'string' && body.threadId.trim()
-    ? body.threadId.trim()
-    : undefined;
+  if (body.input === undefined) {
+    throw new BadRequestException('input is required');
+  }
+  let threadId: string | undefined;
+  if (body.threadId !== undefined) {
+    if (typeof body.threadId !== 'string' || !ID_PATTERN.test(body.threadId.trim())) {
+      throw new BadRequestException('Invalid threadId');
+    }
+    threadId = body.threadId.trim();
+  }
   return { agent: body.agent.trim(), input: body.input, ...(threadId ? { threadId } : {}) };
 }
 
-/**
- * AI 综合控制器 (AiController)
- *
- * 【安全与鉴权机制】
- * 路由挂载于 `/api/ai/*`，由全局 `ApiSignGuard` 校验。配置 `ai.access` 后，
- * Agent 运行和 Trace 路由会根据调用方的签名或会话确定访问范围。
- *
- * 【接口能力分布】
- * 1. Agent 任务执行：
- *    - POST `/api/ai/agent/run`：非流式 JSON 响应
- *    - POST `/api/ai/agent/run/stream`：SSE 流式实时事件推送（delta, step, done）
- *    - GET `/api/ai/agent/graph`：LangGraph Agent 状态图拓扑结构查询
- * 2. 运行链路查询：
- *    - GET `/api/ai/trace/:runId`：获取指定运行的完整步骤与事实记录
- * 3. 元数据资产查询：
- *    - GET `/api/ai/agent/list`：查询已注册 Agent 声明列表
- *    - GET `/api/ai/agent/config`：查询脱敏后的 AI 与知识库运行配置
- *    - GET `/api/ai/tool/list`：查询已注册 Tool 描述列表
- */
+function resolveChatMessages(body: ChatRequest): { messages: LlmMessage[]; model?: string; tools?: unknown[] } {
+  if (!body || typeof body !== 'object') {
+    throw new BadRequestException('Invalid chat request');
+  }
+  let model: string | undefined;
+  if (body.model !== undefined) {
+    if (typeof body.model !== 'string' || !body.model.trim() || body.model.length > 128) {
+      throw new BadRequestException('Invalid model');
+    }
+    model = body.model.trim();
+  }
+  if (body.tools !== undefined && !Array.isArray(body.tools)) {
+    throw new BadRequestException('Invalid tools');
+  }
+  if (Array.isArray(body.messages)) {
+    if (body.messages.length === 0) {
+      throw new BadRequestException('messages cannot be empty');
+    }
+    for (const msg of body.messages) {
+      if (!msg || typeof msg !== 'object') {
+        throw new BadRequestException('Invalid chat message');
+      }
+      const role = (msg as { role?: unknown }).role;
+      const content = (msg as { content?: unknown }).content;
+      if (role === 'user' || role === 'system') {
+        if (typeof content !== 'string') throw new BadRequestException('Invalid message content');
+      } else if (role === 'assistant') {
+        if (content !== null && typeof content !== 'string') throw new BadRequestException('Invalid assistant message');
+      } else if (role === 'tool') {
+        if (typeof content !== 'string' || typeof (msg as { tool_call_id?: unknown }).tool_call_id !== 'string') {
+          throw new BadRequestException('Invalid tool message');
+        }
+      } else {
+        throw new BadRequestException('Invalid message role');
+      }
+    }
+    return { messages: body.messages as LlmMessage[], model, tools: body.tools as unknown[] | undefined };
+  }
+  if (typeof body.message === 'string' && body.message.trim()) {
+    return { messages: [{ role: 'user', content: body.message }], model, tools: body.tools as unknown[] | undefined };
+  }
+  throw new BadRequestException('message or messages is required');
+}
+
+function parseNonNegativeInt(raw: unknown, fallback: number, max: number, name: string): number {
+  if (raw === undefined || raw === '') return fallback;
+  const text = Array.isArray(raw) ? undefined : String(raw);
+  if (!text || !/^\d+$/.test(text)) {
+    throw new BadRequestException(`Invalid ${name}`);
+  }
+  const value = Number(text);
+  if (!Number.isSafeInteger(value) || value < 0 || value > max) {
+    throw new BadRequestException(`Invalid ${name}`);
+  }
+  return value;
+}
+
 @Controller('api/ai')
 export class AiController {
-  /**
-   * 构造函数注入所有 AI 子系统核心服务
-   *
-   * @param tools 通用工具注册表服务
-   * @param agents Agent 纯声明元数据服务
-   * @param orchestrator LangGraph Agent 编排引擎服务
-   * @param trace 链路运行追踪与记录持久化服务
-   * @param configService 全局配置服务
-   */
   constructor(
     private readonly tools: ToolRegistryService,
     private readonly agents: AgentScannerService,
     private readonly orchestrator: LangGraphOrchestratorService,
     private readonly trace: TraceService,
     private readonly configService: ConfigService,
+    @Optional() private readonly skills?: SkillScannerService,
+    @Optional() private readonly executor?: ExecutorService,
+    @Optional() private readonly planner?: LangChainPlannerService,
   ) {}
 
-  /**
-   * 执行指定 Agent 并等待全流程结束（非流式）
-   *
-   * @param body 请求体包含 agent, input 以及可选的 threadId
-   * @returns 保证锁死合同: { success: true, data: { runId, output, steps, threadId } }
-   */
+  @Post('chat')
+  async chat(@Body() body: ChatRequest): Promise<LlmChatResult> {
+    const { messages, model, tools } = resolveChatMessages(body);
+    if (this.planner) {
+      return this.planner.chat(messages, { model, tools });
+    }
+    const resolved = resolveLlm(this.configService, model);
+    if (resolved.kind === 'custom') {
+      const result = await resolved.provider.chat(messages, { model, tools });
+      if (Symbol.asyncIterator in result) {
+        let output = '';
+        for await (const chunk of result) output += chunk;
+        return { output };
+      }
+      return result;
+    }
+
+    const lcMessages = toLangChainMessages(messages);
+    const aiMessage = await resolved.model.invoke(lcMessages);
+    const output = typeof aiMessage.content === 'string' ? aiMessage.content : JSON.stringify(aiMessage.content ?? '');
+    const metadata = aiMessage.usage_metadata;
+    const usage = metadata ? {
+      inputTokens: metadata.input_tokens,
+      outputTokens: metadata.output_tokens,
+      totalTokens: metadata.total_tokens,
+    } : undefined;
+    return {
+      output,
+      message: { role: 'assistant', content: output },
+      ...(usage ? { usage } : {}),
+    };
+  }
+
+  @Post('chat/stream')
+  async chatStream(@Body() body: ChatRequest, @Res() response: Response): Promise<void> {
+    const { messages, model, tools } = resolveChatMessages(body);
+    if (this.planner) {
+      resolveLlmCandidates(this.configService, model);
+      this.initSseResponse(response);
+      const heartbeat = this.startHeartbeat(response);
+      try {
+        const result = await this.planner.chatStream(messages, {
+          model,
+          tools,
+          onDelta: (content) => {
+            this.sendSseEvent(response, 'delta', { content });
+          },
+          resetDelta: () => {
+            this.sendSseEvent(response, 'delta_reset', {});
+          },
+        });
+        this.sendSseEvent(response, 'done', result);
+      } catch {
+        this.sendSseEvent(response, 'error', { success: false, message: 'Chat stream failed', code: 500 });
+      } finally {
+        clearInterval(heartbeat);
+        response.end();
+      }
+      return;
+    }
+
+    const resolved = resolveLlm(this.configService, model);
+    this.initSseResponse(response);
+    const heartbeat = this.startHeartbeat(response);
+    try {
+      let output = '';
+      if (resolved.kind === 'custom') {
+        const result = await resolved.provider.chat(messages, { model, tools, stream: true });
+        if (Symbol.asyncIterator in result) {
+          for await (const chunk of result) {
+            output += chunk;
+            this.sendSseEvent(response, 'delta', { content: chunk });
+          }
+          this.sendSseEvent(response, 'done', { output });
+        } else {
+          output = result.output;
+          if (output) this.sendSseEvent(response, 'delta', { content: output });
+          this.sendSseEvent(response, 'done', result);
+        }
+      } else {
+        const stream = await resolved.model.stream(toLangChainMessages(messages));
+        for await (const chunk of stream) {
+          const text = typeof chunk.content === 'string' ? chunk.content : '';
+          if (text) {
+            output += text;
+            this.sendSseEvent(response, 'delta', { content: text });
+          }
+        }
+        this.sendSseEvent(response, 'done', { output });
+      }
+    } catch {
+      this.sendSseEvent(response, 'error', { success: false, message: 'Chat stream failed', code: 500 });
+    } finally {
+      clearInterval(heartbeat);
+      response.end();
+    }
+  }
+
   @Post('agent/run')
   async runAgent(
     @Body() body: AgentRunRequest,
@@ -107,17 +271,6 @@ export class AiController {
     return { success: true, data: result };
   }
 
-  /**
-   * 执行指定 Agent 并通过 SSE (Server-Sent Events) 实时推送执行轨迹与增量文本
-   *
-   * 【SSE 事件流契约】
-   * 1. `event: step`：每当产生 plan, tool, observe, final 步骤时实时推送该步骤数据；
-   * 2. `event: delta`：模型产出最终答案时按字符流式推送内容片段；
-   * 3. `event: done`：流程完全闭合，推送与非流式端点同构的 `{ success: true, data: RunResult }` 载荷（含 threadId）。
-   *
-   * @param body 请求体
-   * @param response Express 原始响应对象
-   */
   @Post('agent/run/stream')
   async runAgentStream(
     @Body() body: AgentRunRequest,
@@ -125,30 +278,215 @@ export class AiController {
     @Req() request?: Request,
   ): Promise<void> {
     const { agent, input, threadId } = resolveAgentRun(body);
-    const result = await this.orchestrator.run(agent, input, (event: RuntimeEvent) => {
+    let heartbeat: NodeJS.Timeout | undefined;
+    try {
+      const result = await this.orchestrator.run(agent, input, (event: RuntimeEvent) => {
+        if (!response.headersSent) {
+          this.initSseResponse(response);
+          heartbeat = this.startHeartbeat(response);
+        }
+        if (event.type === 'start') {
+          this.sendSseEvent(response, 'start', { runId: event.runId });
+          return;
+        }
+        if (event.type === 'delta') {
+          this.sendSseEvent(response, 'delta', { content: event.content });
+          return;
+        }
+        if (event.type === 'delta_reset') {
+          this.sendSseEvent(response, 'delta_reset', {});
+          return;
+        }
+        if (event.type === 'status') {
+          this.sendSseEvent(response, 'status', {
+            status: event.status,
+            ...(event.approval ? { approval: event.approval } : {}),
+            ...(event.failure ? { failure: event.failure } : {}),
+          });
+          return;
+        }
+        this.sendSseEvent(response, 'step', event.step);
+      }, threadId, request?.agentRunAccess);
+
       if (!response.headersSent) {
         this.initSseResponse(response);
       }
-      if (event.type === 'delta') {
-        this.sendSseEvent(response, 'delta', { content: event.content });
-        return;
+      this.sendSseEvent(response, 'done', { success: true, data: result });
+      response.end();
+    } catch (error) {
+      if (!response.headersSent) {
+        throw error;
       }
-      this.sendSseEvent(response, 'step', event.step);
-    }, threadId, request?.agentRunAccess);
-    if (!response.headersSent) {
-      this.initSseResponse(response);
+      this.sendSseEvent(response, 'error', {
+        success: false,
+        message: 'Agent stream failed',
+        code: 500,
+      });
+      response.end();
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
-
-    // 推送结束事件并切断流
-    this.sendSseEvent(response, 'done', { success: true, data: result });
-    response.end();
   }
 
-  /**
-   * 获取 LangGraph Agent 循环图拓扑（节点与连线）
-   *
-   * @returns 拓扑结构 { nodes, edges }
-   */
+  @Post('agent/runs')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async submitAgentRun(
+    @Body() body: AgentRunRequest,
+    @Req() request?: Request,
+  ) {
+    const { agent, input, threadId } = resolveAgentRun(body);
+    const data = await this.orchestrator.submit(agent, input, threadId, request?.agentRunAccess);
+    return { success: true as const, data };
+  }
+
+  @Get('agent/runs')
+  async listAgentRuns(
+    @Query('limit') rawLimit?: unknown,
+    @Query('offset') rawOffset?: unknown,
+    @Req() request?: Request,
+  ) {
+    const limit = parseNonNegativeInt(rawLimit, 20, 100, 'limit');
+    if (limit < 1) {
+      throw new BadRequestException('Invalid limit');
+    }
+    const offset = parseNonNegativeInt(rawOffset, 0, 100_000, 'offset');
+    const access = request?.agentRunAccess;
+    const runs = await this.orchestrator.list({
+      scope: access?.scope,
+      agents: access?.agents,
+      offset,
+      limit,
+    });
+    return {
+      success: true as const,
+      data: {
+        limit,
+        offset,
+        items: runs.map(run => ({
+          runId: run.runId,
+          agent: run.agent,
+          threadId: run.threadId,
+          status: run.status ?? 'succeeded',
+          createdAt: run.createdAt,
+          updatedAt: run.updatedAt,
+          ...(run.usage ? { usage: run.usage } : {}),
+          ...(typeof run.modelDurationMs === 'number' ? { modelDurationMs: run.modelDurationMs } : {}),
+          ...(run.failure ? { failure: run.failure } : {}),
+          ...(run.approval ? { approval: run.approval } : {}),
+          ...(run.parentRunId ? { parentRunId: run.parentRunId } : {}),
+          ...(run.rootRunId ? { rootRunId: run.rootRunId } : {}),
+        })),
+      },
+    };
+  }
+
+  @Get('agent/runs/:runId')
+  async getAgentRun(@Param('runId') runId: string, @Req() request?: Request) {
+    const run = await this.orchestrator.find(runId, request?.agentRunAccess);
+    if (!run) {
+      throw new NotFoundException(`Run "${runId}" does not exist`);
+    }
+    return { success: true as const, data: toPublicRunDetail(run) };
+  }
+
+  @Get('agent/runs/:runId/events')
+  async subscribeAgentRunEvents(
+    @Param('runId') runId: string,
+    @Query('after') rawAfter: unknown,
+    @Req() request: Request,
+    @Res() response: Response,
+  ): Promise<void> {
+    const after = parseNonNegativeInt(rawAfter, 0, 1_000_000, 'after');
+    let heartbeat: NodeJS.Timeout | undefined;
+    let unsubscribe: (() => void) | undefined;
+
+    await new Promise<void>(async (resolve, reject) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        if (heartbeat) clearInterval(heartbeat);
+        unsubscribe?.();
+        if (!response.writableEnded) response.end();
+        resolve();
+      };
+
+      try {
+        unsubscribe = await this.orchestrator.subscribe(runId, after, request.agentRunAccess, (evt) => {
+          if (!response.headersSent) {
+            this.initSseResponse(response);
+            heartbeat = this.startHeartbeat(response);
+          }
+          this.sendSseEvent(response, evt.event, evt.data);
+          if (evt.event === 'done') {
+            finish();
+          }
+        });
+        if (!finished) {
+          request.on('close', finish);
+        }
+      } catch (error) {
+        if (heartbeat) clearInterval(heartbeat);
+        reject(error);
+      }
+    });
+  }
+
+  @Post('agent/runs/:runId/cancel')
+  @HttpCode(HttpStatus.OK)
+  async cancelAgentRun(@Param('runId') runId: string, @Req() request?: Request) {
+    const data = await this.orchestrator.cancel(runId, request?.agentRunAccess);
+    return { success: true as const, data };
+  }
+
+  @Post('agent/runs/:runId/approval')
+  @HttpCode(HttpStatus.ACCEPTED)
+  async approveAgentRun(
+    @Param('runId') runId: string,
+    @Body() body: ApprovalDecisionRequest,
+    @Req() request?: Request,
+  ) {
+    if (!body || typeof body !== 'object' || typeof body.approvalId !== 'string' || !UUID_PATTERN.test(body.approvalId) || typeof body.approved !== 'boolean') {
+      throw new BadRequestException('approvalId (uuid) and approved (boolean) are required');
+    }
+    const data = await this.orchestrator.decide(runId, body.approvalId, body.approved, request?.agentRunAccess);
+    return { success: true as const, data };
+  }
+
+  @Post('skill/:name/invoke')
+  async invokeSkill(
+    @Param('name') name: string,
+    @Body() body: unknown,
+    @Req() request?: Request,
+  ) {
+    const access = request?.agentRunAccess;
+    if (access?.skills && !access.skills.includes(name)) {
+      throw new ForbiddenException(`Skill "${name}" cannot be invoked directly by this caller`);
+    }
+    const skill = this.skills?.get(name);
+    if (!skill) {
+      throw new NotFoundException(`Skill "${name}" is not registered`);
+    }
+    if (!this.executor) {
+      throw new NotFoundException('Skill executor is unavailable');
+    }
+    try {
+      const output = await this.executor.invokeSkill(skill, body, {
+        scope: access?.scope,
+        directInvoke: true,
+      });
+      return { success: true as const, data: output };
+    } catch (error) {
+      if (error instanceof CapabilityApprovalRequired) {
+        throw new ForbiddenException(error.message);
+      }
+      if (error instanceof CapabilityInputInvalid) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
+  }
+
   @Get('agent/graph')
   getAgentGraph(@Query('mode') mode?: string): { nodes: unknown; edges: unknown } {
     if (mode === undefined) {
@@ -160,23 +498,12 @@ export class AiController {
     return this.orchestrator.getGraph(mode);
   }
 
-  /**
-   * 根据 runId 查询历史运行追踪记录
-   *
-   * @param runId 运行任务 ID
-   * @returns 包含完整 TraceRun 对象的响应
-   * @throws 若记录不存在，返回业务错误码 40402
-   */
   @Get('trace/:runId')
   async getTrace(@Param('runId') runId: string, @Req() request?: Request) {
     const run = await this.findTraceOrThrow(runId, request?.agentRunAccess);
     return { success: true, data: run };
   }
 
-  /**
-   * 按 runId 查询已持久化的 token 用量合计。
-   * 已存在的运行没有用量记录时返回 null，找不到运行时沿用 Trace 查询的错误响应。
-   */
   @Get('trace/:runId/usage')
   async getTraceUsage(@Param('runId') runId: string, @Req() request?: Request) {
     const run = await this.findTraceOrThrow(runId, request?.agentRunAccess);
@@ -186,34 +513,23 @@ export class AiController {
     };
   }
 
-  /**
-   * 获取当前环境中所有已注册工具 (Tool) 的声明定义列表
-   *
-   * 【契约保护】
-   * 仅返回可序列化的元数据（name, description, inputSchema, source），剔除本地 execute 实现
-   *
-   * @returns 工具定义数组
-   */
   @Get('tool/list')
   listTools(): Array<{
     name: string;
     description: string;
     inputSchema: unknown;
     source?: string;
+    approval?: 'required';
   }> {
-    return this.tools.list().map(({ name, description, inputSchema, source }) => ({
+    return this.tools.list().map(({ name, description, inputSchema, source, approval }) => ({
       name,
       description,
       inputSchema,
       ...(source ? { source } : {}),
+      ...(approval ? { approval } : {}),
     }));
   }
 
-  /**
-   * 获取当前已发现并注册的 Agent 纯声明列表
-   *
-   * @returns Agent 声明数组
-   */
   @Get('agent/list')
   listAgents() {
     return this.agents.list();
@@ -250,6 +566,14 @@ export class AiController {
     const vectorDriver = vectorObj?.driver === 'mysql' || vectorObj?.driver === 'qdrant' ? vectorObj.driver : 'file';
     const guardrail = resolveGuardrailRuleSet(this.configService);
 
+    const llmConfig = readLlmConfig(this.configService);
+    const llmFallbacks = Array.isArray(llmConfig?.fallbacks)
+      ? llmConfig.fallbacks.filter((name): name is string => typeof name === 'string' && Boolean(name.trim())).map(name => name.trim())
+      : [];
+    const llmCircuitBreaker = llmConfig?.circuitBreaker !== undefined
+      ? resolveCircuitBreakerConfig(this.configService, llmFallbacks.length > 0)
+      : undefined;
+
     return {
       threadEnabled: resolveThreadEnabled(this.configService),
       maxIterations: resolveMaxIterations(this.configService),
@@ -259,6 +583,8 @@ export class AiController {
       llm: {
         default: defaultLlm,
         models: modelNames(llm?.models),
+        ...(llmFallbacks.length ? { fallbacks: llmFallbacks } : {}),
+        ...(llmCircuitBreaker ? { circuitBreaker: llmCircuitBreaker } : {}),
       },
       embedding: {
         default: defaultEmbedding,
@@ -300,11 +626,6 @@ export class AiController {
     };
   }
 
-  /**
-   * 初始化标准 SSE (Server-Sent Events) HTTP 响应头
-   *
-   * @param response Express 响应实例
-   */
   private initSseResponse(response: Response): void {
     response.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     response.setHeader('Cache-Control', 'no-cache');
@@ -312,24 +633,28 @@ export class AiController {
     response.flushHeaders();
   }
 
-  /**
-   * 统一向客户端输出指定事件名称与 JSON 序列化数据的 SSE 帧
-   *
-   * @param response Express 响应实例
-   * @param event 事件名称（如 delta, step, done）
-   * @param data 载荷数据
-   */
+  private startHeartbeat(response: Response): NodeJS.Timeout {
+    const timer = setInterval(() => {
+      if (!response.writableEnded) {
+        response.write(': heartbeat\n\n');
+      }
+    }, SSE_HEARTBEAT_MS);
+    timer.unref();
+    return timer;
+  }
+
   private sendSseEvent(response: Response, event: string, data: unknown): void {
     response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
-  /**
-   * 查找指定的 Trace 运行记录，不存在时抛出业务 40402 异常
-   *
-   * @param runId 运行标识
-   * @returns Trace 记录
-   */
   private async findTraceOrThrow(runId: string, access?: AgentRunAccess) {
+    if (access && (runId === 'latest' || runId === 'runId' || !ID_PATTERN.test(runId))) {
+      throw new HttpException({
+        success: false,
+        message: `Trace "${runId}" does not exist`,
+        code: 40402,
+      }, HttpStatus.OK);
+    }
     const run = await this.trace.load(runId);
     if (!run || run.scope !== access?.scope || (access?.agents && !access.agents.includes(run.agent))) {
       throw new HttpException({
@@ -338,7 +663,7 @@ export class AiController {
         code: 40402,
       }, HttpStatus.OK);
     }
-    const { scope, ...trace } = run;
+    const { scope: _scope, workerId: _workerId, continuation: _continuation, ...trace } = run;
     return trace;
   }
 }

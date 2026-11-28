@@ -62,10 +62,12 @@ export class McpLoader {
       const descriptors = await client.listTools();
 
       // 每个 MCP tool 适配为 ToolDefinition
+      const approvalSet = new Set(Array.isArray(server.approvalTools) ? server.approvalTools : []);
       const serverTools: ToolDefinition[] = [];
       for (const desc of descriptors) {
         const toolDef: ToolDefinition = {
           name: desc.name,
+          ...(approvalSet.has(desc.name) ? { approval: 'required' as const } : {}),
           description: desc.description ?? '',
           inputSchema: desc.inputSchema ?? {},
           source: 'mcp', // 必填，禁止默认 builtin

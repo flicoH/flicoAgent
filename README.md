@@ -8,11 +8,11 @@ flicoAgent 是一个基于 NestJS 的应用框架内核，提供项目配置、�
 
 ## 功能概览
 
-- NestJS HTTP 服务，默认监听 `8080`
+- NestJS HTTP 服务，默认监听 `8080`（支持 `port` / `PORT` 环境变量与优雅停机）
 - 基于 `_ENV` 或 `__ENV` 加载环境配置
 - 自动加载业务工程 `dist/modules/**/*.module.js`、`dist/skills/**/*.skill.js` 和 `dist/agents/**/*.agent.js`
 - Vue 3 + Vite 多页面构建及 Nunjucks 页面模板
-- 可配置的 OpenAI 兼容 LLM、Embedding、MCP 工具、RAG、Guardrail、Memory 与 Trace
+- 可配置的 OpenAI 兼容 LLM（支持推理参数、主备模型 Fallback 与熔断）、Agent 结构化输出（`outputSchema`）、Embedding、MCP 工具、RAG、Guardrail、Memory 与 Trace
 - 内置文件型 Trace、Memory 和 Vector 存储实现
 - `flico-agent-eval` 离线回归评测，提供 JSON 报告和 CI 退出码
 
@@ -164,7 +164,7 @@ module.exports = {
 };
 ```
 
-LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider 支持 `dashscope-compatible` 和 `openai-compatible`；LLM 内置 provider 为 `openai-compatible`。`ai.mcp` 默认关闭；如需使用 MCP，请配置服务器并启用。业务配置还可通过 `require('@flicoh/agent').serverStart({ name: 'my-app' })` 传入启动选项。
+LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider 支持 `dashscope-compatible` 和 `openai-compatible`；LLM 内置 provider 为 `openai-compatible`，并支持在全局 `ai.llm`、单模型及 `AgentDefinition` 三层配置 `temperature`、`maxTokens`、`topP`、`timeoutMs`、`fallbacks` 与 `circuitBreaker`（详见 [LLM 推理参数、主备 Fallback 与熔断](docs/agent-operations.md#llm-推理参数主备-fallback-与熔断)）。`ai.mcp` 默认关闭；如需使用 MCP，请配置服务器并启用。业务配置还可通过 `require('@flicoh/agent').serverStart({ name: 'my-app' })` 传入启动选项。
 
 ## 页面与接口
 
@@ -196,9 +196,9 @@ LLM/Embedding 密钥仅在实际调用相应能力时必需。Embedding provider
 
 ### SSE 和存储
 
-- Agent 流发送 `start`、`step`、`delta`，成功时以 `done` 收尾。收到 `delta_reset` 时清空当前回答的临时文本，继续保留步骤。Chat 流发送 `delta` 与 `done`。响应开始后的失败以 `error` 事件返回，连接空闲时会发送心跳。
+- Agent 流发送 `start`、`step`、`delta`，成功时以 `done` 收尾。收到 `delta_reset` 时清空当前回答的临时文本，继续保留步骤。Chat 流发送 `delta` 与 `done`（主备切备中途失败时同样发送 `delta_reset`）。响应开始后的失败以 `error` 事件返回，连接空闲时会发送心跳。
 - Skill 与 Tool 的 `inputSchema` 在执行前校验。`ai.tools.serviceInvoke` 以服务名为键，以开放的方法名数组为值。例如 `{ ProjectService: ['getProjectDetail'] }`。
-- `ai.store.trace.use`、`ai.store.memory.use`、`ai.store.vector.use` 接受存储实例或接收 `ConfigService` 的工厂。跨实例会话存储可实现 `MemoryStore.runTurn`，用共享锁协调同一线程。默认文件存储适用于单实例。
+- `ai.store.trace`、`ai.store.memory` 支持 `file`（默认）、`mysql`、`redis` 驱动或 `use` 工厂，`ai.store.vector` 支持 `file`、`mysql`、`qdrant` 或 `use` 工厂；`ai.access.nonceStore` 支持 `memory`（默认）、`mysql`、`redis` 跨实例防重放。详细接入见 [多实例生产存储与分布式防重放](docs/agent-operations.md#多实例生产存储与分布式防重放)。
 - 知识库提供文档列表、删除索引、重建、检索预览、Wiki 主题页读取和切片定位。原文可来自文件目录或 MySQL，向量索引支持文件、MySQL 和 Qdrant。检索支持原文 RAG、LLM Wiki 和混合模式（`ai.rag.mode`）。连接配置和引用定位见 [RAG 知识库](docs/agent-operations.md#rag-知识库)。
 
 ## npm 脚本
@@ -258,6 +258,10 @@ export default {
 
 所有模型阶段均计入 `ai.runtime.maxIterations`，有委派时还计入运行树共享模型预算。Reflection 若要完成一次修订并再次审阅，至少需要四次模型调用，工具调用可能增加所需轮次。子 Agent 使用自己的 `mode`。同步和 SSE 接口仍按 Agent 名称发起运行，可以使用 `GET /api/ai/agent/graph?mode=reflection` 查看指定模式的拓扑。
 
+### 结构化输出（`outputSchema`）
+
+在 `AgentDefinition` 中声明 `outputSchema`（JSON Schema）与可选 `maxOutputRetries`（默认 `2`）后，框架会在提示词中自动注入结构约束、使用 `ajv` 严格校验最终输出 JSON，并在格式不合法时自动触发有限次纠错重试。校验通过后，同步接口、SSE `done` 与 Trace 会同时返回规范化的 JSON 字符串 `output` 与可直接消费的 `structuredOutput`；超出重试上限时在终态步骤记录 `INVALID_STRUCTURED_OUTPUT`。完整示例见 [Agent 结构化输出](docs/agent-operations.md#agent-结构化输出outputschema)。
+
 ### 多 Agent 委派
 
 在 Agent 声明中设置 `delegates` 后，可以通过保留工具 `agent-delegate` 调用列出的子 Agent。父执行步骤提供 `childRunId`，子 Trace 提供 `parentRunId`、`rootRunId` 和 `delegationDepth`。配置及离线测试步骤见 [Agent 委派接入示例](docs/agent-delegation.md)。
@@ -277,7 +281,7 @@ CLI 按顺序调用 Agent 同步接口，验证工具执行、RAG 引用、权�
 - **提示缺少模型 API Key**：确认当前环境配置文件存在、环境名正确，并且 `apiKey` 已读取到有效环境变量。
 - **业务模块或 Skill/Agent 未加载**：确认在业务工程根目录启动，并确认构建产物位于 `dist/modules/`、`dist/skills/`、`dist/agents/` 对应目录且文件名符合约定。
 - **页面模板或静态文件 404**：检查业务工程 `app/public/` 目录及构建输出；模板路径需匹配 `dist/entry.:page.tpl`。
-- **端口占用**：当前服务端口在 `app/main.ts` 中固定为 `8080`，请先释放该端口。
+- **端口占用**：可通过环境变量 `PORT`、配置文件 `port` 或 `serverStart({ port })` 切换端口（默认 `8080`）。
 
 ## 开发规范
 

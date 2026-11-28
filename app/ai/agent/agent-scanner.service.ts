@@ -1,6 +1,7 @@
 import { Injectable, OnModuleInit } from '@nestjs/common';
 import { createRequire } from 'node:module';
 import { dirname, isAbsolute, resolve } from 'node:path';
+import { isValidOutputSchema } from '../runtime/internal/structured-output';
 import { AgentDefinition, isAgentLoopMode } from './agent.interface';
 
 // 用于动态加载业务 demo 编译后的 Agent 及 Prompt CommonJS 模块
@@ -48,6 +49,21 @@ function isAgentDefinition(value: unknown): value is AgentDefinition {
     && (agent.prompt === undefined || typeof agent.prompt === 'string')
     && (agent.promptFile === undefined || typeof agent.promptFile === 'string')
     && (agent.model === undefined || typeof agent.model === 'string')
+    && (agent.fallbacks === undefined || (Array.isArray(agent.fallbacks)
+      && agent.fallbacks.every(item => typeof item === 'string' && Boolean(item.trim()))))
+    && (agent.temperature === undefined
+      || (typeof agent.temperature === 'number' && Number.isFinite(agent.temperature) && agent.temperature >= 0))
+    && (agent.maxTokens === undefined
+      || (typeof agent.maxTokens === 'number' && Number.isSafeInteger(agent.maxTokens) && agent.maxTokens > 0))
+    && (agent.topP === undefined
+      || (typeof agent.topP === 'number' && Number.isFinite(agent.topP) && agent.topP > 0 && agent.topP <= 1))
+    && (agent.timeoutMs === undefined
+      || (typeof agent.timeoutMs === 'number' && Number.isSafeInteger(agent.timeoutMs) && agent.timeoutMs > 0))
+    && (agent.timeout === undefined
+      || (typeof agent.timeout === 'number' && Number.isSafeInteger(agent.timeout) && agent.timeout > 0))
+    && (agent.outputSchema === undefined || isValidOutputSchema(agent.outputSchema))
+    && (agent.maxOutputRetries === undefined
+      || (typeof agent.maxOutputRetries === 'number' && Number.isSafeInteger(agent.maxOutputRetries) && agent.maxOutputRetries >= 0))
     && (agent.mode === undefined || isAgentLoopMode(agent.mode))
     && (agent.maxReflectionRevisions === undefined
       || (Number.isSafeInteger(agent.maxReflectionRevisions) && agent.maxReflectionRevisions >= 0));

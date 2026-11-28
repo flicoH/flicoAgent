@@ -175,3 +175,154 @@ npx flico-agent-eval --suite ./eval/cases.json --url http://localhost:8080 --out
 | `30` | 无法将 JSON 报告写入指定文件或标准输出。 |
 
 业务代码可以从 `@flicoh/agent/eval` 导入 `parseSuite` 和 `runSuite`，并向 `runSuite` 提供接收 `{ agent, input, threadId }`、返回 `{ status, body }` 的异步请求函数。
+
+## 多实例生产存储与分布式防重放
+
+默认文件存储（`FileTraceStore`、`FileMemoryStore`）与内存 Nonce 表（`InMemoryNonceStore`）适用于单实例部署。多副本水平扩展时，可切换为内置的 **MySQL** 或 **Redis** 驱动，或通过 `use` 注入自定义实例/工厂：
+
+| 配置项 | 可选 `driver` | 能力说明 |
+| --- | --- | --- |
+| `ai.store.trace` | `file`（默认）、`mysql`、`redis` | 持久化运行状态、步骤、用量、审批快照，并支持按 `scope` 与 `agents` 分页列表 |
+| `ai.store.memory` | `file`（默认）、`mysql`、`redis` | 持久化多轮对话检查点；`mysql` 使用 `GET_LOCK`、`redis` 使用 `SET NX PX` + Lua 解锁实现跨实例 `runTurn` 串行锁 |
+| `ai.access.nonceStore` | `memory`（默认）、`mysql`、`redis` | 原子消费 HMAC 请求 `x-agent-nonce`，跨实例防止签名重放 |
+
+### MySQL 多实例配置
+
+对 MySQL 数据库执行 [建表脚本](ai-store-mysql.sql) 创建 `flico_ai_traces`、`flico_ai_memory` 和 `flico_ai_nonces` 三张表，并复用框架的 `db` 连接配置：
+
+```js
+module.exports = {
+  db: {
+    client: 'mysql2',
+    connection: {
+      host: process.env.DB_HOST,
+      user: process.env.DB_USER,
+      password: process.env.DB_PASSWORD,
+      database: process.env.DB_NAME,
+    },
+  },
+  ai: {
+    access: {
+      nonceStore: { driver: 'mysql', namespace: 'prod' },
+    },
+    store: {
+      trace: { driver: 'mysql', namespace: 'prod' },
+      memory: { driver: 'mysql', namespace: 'prod', lockTimeoutSeconds: 30 },
+    },
+  },
+};
+```
+
+### Redis 多实例配置
+
+框架通过最小接口 `RedisLikeClient`（`get`、`set`、`del` 及可选 `eval`、`zadd`、`zrevrange`、`expire`）兼容 `ioredis` / `node-redis`，业务工程直接传入已创建的客户端实例即可，无需强绑框架依赖版本：
+
+```js
+const Redis = require('ioredis');
+const redis = new Redis(process.env.REDIS_URL);
+
+module.exports = {
+  ai: {
+    access: {
+      nonceStore: { driver: 'redis', namespace: 'prod', client: redis },
+    },
+    store: {
+      trace: { driver: 'redis', namespace: 'prod', ttlMs: 7 * 24 * 3600 * 1000, client: redis },
+      memory: { driver: 'redis', namespace: 'prod', lockTtlMs: 60_000, lockTimeoutMs: 30_000, client: redis },
+    },
+  },
+};
+```
+
+## 服务端口与优雅停机
+
+- 监听端口按以下优先级解析：`serverStart({ port })` > 配置文件 `port` > 环境变量 `PORT` > 默认 `8080`；同时支持可选 `host`。
+- `bootstrap()` 默认启用 Nest 优雅停机钩子（`enableShutdownHooks()`），收到 `SIGTERM`/`SIGINT` 时自动关闭 MCP 子进程并释放数据库连接池。如需自定义停机流程，可传入 `shutdownHooks: false`。
+
+## LLM 推理参数、主备 Fallback 与熔断
+
+### 参数优先级与可配置项
+
+推理参数支持在 **全局 `ai.llm`**、**单模型 `ai.llm.models.<key>`** 与 **Agent 声明（`*.agent.ts`）** 三层配置，按 **Agent 声明 > 单模型配置 > 全局 `ai.llm` > 框架默认值** 合并生效：
+
+| 参数 | 说明 | 默认值 |
+| --- | --- | --- |
+| `temperature` | 采样温度（非负实数） | `0` |
+| `maxTokens` | 单次生成最大输出 token 数（正整数） | 缺省（由上游决定） |
+| `topP` | 核采样概率阈值 `(0, 1]` | 缺省 |
+| `timeoutMs`（别名 `timeout`） | 单次模型调用超时毫秒数（正整数），同时作用于 OpenAI 兼容模型与自定义 `use` Provider | 缺省 |
+| `maxRetries` | 单模型 SDK 内部最大重试次数 | 无 `fallbacks` 时为 `2`；配置了 `fallbacks` 时为 `0`（快速切备） |
+
+### 主备模型链与熔断配置示例
+
+```js
+module.exports = {
+  ai: {
+    llm: {
+      default: 'qwen',
+      temperature: 0.2,
+      maxTokens: 2048,
+      timeoutMs: 30_000,
+      fallbacks: ['deepseek', 'kimi'],
+      circuitBreaker: {
+        enabled: true,
+        failureThreshold: 3,   // 连续 3 次可重试故障触发熔断（open）
+        cooldownMs: 30_000,    // 冷却 30 秒后进入半开（half_open）探测
+        halfOpenMaxCalls: 1,   // 半开态最多放行 1 个并发探测请求
+      },
+      models: {
+        qwen: {
+          provider: 'openai-compatible',
+          apiKey: process.env.QWEN_API_KEY,
+          model: 'qwen-plus',
+          fallbacks: ['deepseek'], // 模型级优先于全局 fallbacks，框架自动去重
+        },
+        deepseek: {
+          provider: 'openai-compatible',
+          apiKey: process.env.DEEPSEEK_API_KEY,
+          model: 'deepseek-chat',
+          timeoutMs: 25_000,
+        },
+        kimi: {
+          provider: 'openai-compatible',
+          apiKey: process.env.KIMI_API_KEY,
+          model: 'kimi-k2.6',
+        },
+      },
+    },
+  },
+};
+```
+
+- **切备触发条件**：仅针对瞬态故障（HTTP `429`、HTTP `5xx`、HTTP `408`/超时、网络断连以及 `circuit_open`）自动切换至下一个备用模型；调用方取消（`AbortSignal`）和非瞬态 `4xx`（如 `400`/`401`/`403`/`422`）直接返回错误，不切备也不计入熔断。
+- **流式一致性**：`POST /api/ai/agent/run/stream` 与 `POST /api/ai/chat/stream` 在主模型流式输出中途失败切备前，会自动发送 `delta_reset` SSE 事件通知前端清空临时半截文本，再推送备模型的完整输出。
+- **Trace 切换记录**：每次发生切备或因熔断跳过主模型时，Trace 中会持久化一条脱敏的 `type: "fallback"` 步骤（含 `name: "<from>-><to>"`、`model`、`output: { fromModel, toModel, reason, statusCode?, circuitState?, attempt }` 与安全 `error`），同时在后续成功的 `plan` 步骤上标注实际执行的 `model` 字段。未发生切换时不产生额外步骤。
+
+## Agent 结构化输出（`outputSchema`）
+
+在业务 Agent 声明中配置 `outputSchema`（JSON Schema）后，框架会自动注入结构化输出提示词、提取并校验最终 JSON，在格式不合法时触发最多 `maxOutputRetries`（默认 `2`，设为 `0` 仅校验不重试）次自动纠错重试：
+
+```ts
+import type { AgentDefinition } from '@flicoh/agent';
+
+export default {
+  name: 'ticket-classifier',
+  skills: [],
+  tools: [],
+  outputSchema: {
+    type: 'object',
+    properties: {
+      category: { type: 'string', enum: ['billing', 'technical', 'other'] },
+      priority: { type: 'integer', minimum: 1, maximum: 5 },
+      summary: { type: 'string', minLength: 1 },
+    },
+    required: ['category', 'priority', 'summary'],
+    additionalProperties: false,
+  },
+  maxOutputRetries: 2,
+} satisfies AgentDefinition;
+```
+
+- **结果返回**：校验通过后，同步接口、`POST /api/ai/agent/run/stream` 的 `done` 事件、Trace 及运行详情同时返回规范 JSON 字符串 `output` 与已解析对象 `structuredOutput`。
+- **失败保护**：达到重试上限或模型调用预算仍未通过校验时，不会返回非法 `structuredOutput`，并在终态 `final` 步骤（`node: "validate-output"`）记录 `error.code = "INVALID_STRUCTURED_OUTPUT"`。
+- **流式与模式兼容**：统一覆盖 `react`、`plan-and-execute` 与 `reflection` 三种模式；校验通过前不会向 SSE 提前推送未校验或带 Markdown 代码块围栏的临时 `delta`。

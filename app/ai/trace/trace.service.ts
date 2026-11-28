@@ -1,95 +1,140 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { TRACE_STORE, TraceStore } from '../store/store.interface';
+import { TRACE_STORE, TraceListQuery, TraceStore } from '../store/store.interface';
 import { Step, TraceRun } from '../contracts';
 import { summarizeTokenUsage } from './token-usage';
+
+type TraceLineage = Pick<TraceRun, 'parentRunId' | 'rootRunId' | 'delegationDepth' | 'scope'>;
+
+function summarizeModelDuration(steps: Step[], existing = 0): number | undefined {
+  let total = 0;
+  let hasDuration = false;
+  for (const step of steps) {
+    if (typeof step.modelDurationMs === 'number' && Number.isFinite(step.modelDurationMs) && step.modelDurationMs >= 0) {
+      total += Math.round(step.modelDurationMs);
+      hasDuration = true;
+    }
+  }
+  if (hasDuration) return total;
+  return existing > 0 ? existing : undefined;
+}
 
 /**
  * 运行链路追踪服务 (TraceService)
  *
  * 【追踪职责】
- * TraceService 记录运行期间的事实，不决定 Planner 或 Executor 的分支。
- * 编排器会等待持久化完成，因此存储错误仍会中断当前运行：
- * 1. 初始化运行实例并分配全局唯一 runId (UUID)；
- * 2. 在每个 ReAct 阶段（plan、skill/tool 执行、observe 观察、final 产出）按时间序追加 Step；
- * 3. 当检测到 final 步骤时同步更新运行级别的 output 字段；
- * 4. 提供 Trace 检索接口供前端或审计端点回放链路。
+ * TraceService 记录运行期间的事实，按 runId 串行化持久化更新，
+ * 避免状态转移与步骤追加并发覆盖。
  */
 @Injectable()
 export class TraceService {
-  /**
-   * 构造函数注入抽象存储合同 TraceStore
-   * @param store 追踪存储实现
-   */
+  private readonly queues = new Map<string, Promise<unknown>>();
+
   constructor(@Inject(TRACE_STORE) private readonly store: TraceStore) {}
 
-  /**
-   * 创建初始运行记录并立即持久化
-   *
-   * @param agent 执行本次任务的 Agent 注册名称
-   * @param input 调用方传入的初始入参
-   * @param threadId 可选会话线程 ID
-   * @returns 初始化的 TraceRun 对象
-   */
   async createRun(
     agent: string,
     input: unknown,
     threadId?: string,
-    lineage?: Pick<TraceRun, 'parentRunId' | 'rootRunId' | 'delegationDepth' | 'scope'>,
+    lineageOrScope?: TraceLineage | string,
+    initial?: Partial<TraceRun>,
   ): Promise<TraceRun> {
+    const lineage: TraceLineage = typeof lineageOrScope === 'string'
+      ? { scope: lineageOrScope }
+      : (lineageOrScope ?? {});
     const now = new Date().toISOString();
     const run: TraceRun = {
       ...lineage,
-      runId: randomUUID(),
+      ...initial,
+      runId: initial?.runId ?? randomUUID(),
       agent,
       input,
-      output: '',
-      steps: [],
-      threadId: threadId ?? '',
-      createdAt: now,
-      updatedAt: now,
+      output: initial?.output ?? '',
+      steps: initial?.steps ? [...initial.steps] : [],
+      threadId: threadId ?? initial?.threadId ?? '',
+      createdAt: initial?.createdAt ?? now,
+      updatedAt: initial?.updatedAt ?? now,
     };
-    await this.store.save(run);
+    await this.serialize(run.runId, () => this.store.save(run));
     return run;
   }
 
-  /**
-   * 向指定运行追加一个执行步骤
-   *
-   * @param runId 目标运行 ID
-   * @param step 待追加的步骤记录
-   * @returns 更新后的 TraceRun 对象
-   */
   async addStep(runId: string, step: Step): Promise<TraceRun> {
-    // 采用读取、修改、保存方式追加；同一 runId 的并发追加需要存储层或调用方协调。
-    const run = await this.store.load(runId);
-    if (!run) {
-      throw new Error(`Trace run "${runId}" does not exist`);
-    }
+    return this.serialize(runId, async () => {
+      const run = await this.store.load(runId);
+      if (!run) {
+        throw new Error(`Trace run "${runId}" does not exist`);
+      }
 
-    run.steps.push(step);
-    // 将用量合计随步骤一并持久化，查询时可直接读取。
-    if (step.usage) {
-      run.usage = summarizeTokenUsage(run.steps);
-    }
-    // 当该步骤为最终完成步骤或安全拦截步骤且包含文本输出时，同步更新顶层 output 字段
-    if ((step.type === 'final' || step.type === 'guardrail') && typeof step.output === 'string') {
-      run.output = step.output;
-      if (step.citations?.length) run.citations = step.citations;
-      else delete run.citations;
-    }
-    run.updatedAt = new Date().toISOString();
-    await this.store.save(run);
-    return run;
+      run.steps.push(step);
+      if (step.usage) {
+        run.usage = summarizeTokenUsage(run.steps);
+      }
+      const duration = summarizeModelDuration(run.steps, run.modelDurationMs ?? 0);
+      if (duration !== undefined) {
+        run.modelDurationMs = duration;
+      }
+      if ((step.type === 'final' || step.type === 'guardrail') && typeof step.output === 'string') {
+        run.output = step.output;
+        if (step.citations?.length) run.citations = step.citations;
+        else delete run.citations;
+      }
+      run.updatedAt = new Date().toISOString();
+      await this.store.save(run);
+      return run;
+    });
   }
 
-  /**
-   * 读取指定 runId 的完整运行链路追踪数据
-   *
-   * @param runId 运行 ID
-   * @returns 完整的 TraceRun，若不存在则返回 null
-   */
+  async updateRun(
+    runId: string,
+    updater: Partial<TraceRun> | ((run: TraceRun) => void | Promise<void>),
+  ): Promise<TraceRun> {
+    return this.serialize(runId, async () => {
+      const run = await this.store.load(runId);
+      if (!run) {
+        throw new Error(`Trace run "${runId}" does not exist`);
+      }
+
+      if (typeof updater === 'function') {
+        await updater(run);
+      } else {
+        Object.assign(run, updater);
+      }
+
+      const usage = summarizeTokenUsage(run.steps);
+      if (usage) {
+        run.usage = usage;
+      }
+      const duration = summarizeModelDuration(run.steps, run.modelDurationMs ?? 0);
+      if (duration !== undefined) {
+        run.modelDurationMs = duration;
+      }
+      run.updatedAt = new Date().toISOString();
+      await this.store.save(run);
+      return run;
+    });
+  }
+
   load(runId: string): Promise<TraceRun | null> {
     return this.store.load(runId);
+  }
+
+  async list(query: TraceListQuery): Promise<TraceRun[]> {
+    if (!this.store.list) {
+      throw new Error('Configured TraceStore does not support listing runs');
+    }
+    return this.store.list(query);
+  }
+
+  private serialize<T>(runId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.queues.get(runId) ?? Promise.resolve();
+    const next = previous.then(operation);
+    const tracked = next.catch(() => undefined).finally(() => {
+      if (this.queues.get(runId) === tracked) {
+        this.queues.delete(runId);
+      }
+    });
+    this.queues.set(runId, tracked);
+    return next;
   }
 }

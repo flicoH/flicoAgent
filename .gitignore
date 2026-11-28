@@ -10,3 +10,5 @@ dist/
 /sdd/*
 /sdd/agent-operations/*
 !/sdd/agent-operations/eval-suite.example.json
+
+/docs/diagrams

@@ -8,11 +8,11 @@ This repository contains the framework source code and example pages. The framew
 
 ## Overview
 
-- NestJS HTTP server listening on port `8080` by default
+- NestJS HTTP server listening on port `8080` by default (configurable via `port` / `PORT` with graceful shutdown)
 - Environment-based configuration loading via `_ENV` or `__ENV`
 - Automatic discovery of business `dist/modules/**/*.module.js`, `dist/skills/**/*.skill.js`, and `dist/agents/**/*.agent.js`
 - Vue 3 + Vite multi-page builds with Nunjucks page templates
-- Configurable OpenAI-compatible LLM, Embedding, MCP tools, RAG, Guardrail, Memory, and Trace
+- Configurable OpenAI-compatible LLM (with inference params, primary/fallback routing, and circuit breaker), structured Agent output (`outputSchema`), Embedding, MCP tools, RAG, Guardrail, Memory, and Trace
 - Built-in file-based Trace, Memory, and Vector store implementations
 - `flico-agent-eval` offline regression evaluation CLI with JSON reports and CI exit codes
 
@@ -164,7 +164,7 @@ module.exports = {
 };
 ```
 
-LLM/Embedding API keys are only required when the corresponding capability is invoked. Embedding providers support `dashscope-compatible` and `openai-compatible`; built-in LLM provider is `openai-compatible`. `ai.mcp` is disabled by default; configure servers and enable it to use MCP. Business options can also be passed via `require('@flicoh/agent').serverStart({ name: 'my-app' })`.
+LLM/Embedding API keys are only required when the corresponding capability is invoked. Embedding providers support `dashscope-compatible` and `openai-compatible`; built-in LLM provider is `openai-compatible`, supporting `temperature`, `maxTokens`, `topP`, `timeoutMs`, `fallbacks`, and `circuitBreaker` across global `ai.llm`, per-model, and `AgentDefinition` levels (see [Agent Operations Guide](docs/agent-operations.md#llm-推理参数主备-fallback-与熔断)). `ai.mcp` is disabled by default; configure servers and enable it to use MCP. Business options can also be passed via `require('@flicoh/agent').serverStart({ name: 'my-app' })`.
 
 ## Pages and Endpoints
 
@@ -196,7 +196,7 @@ Legacy HTTP threads and Traces lack authorization ownership and must be migrated
 
 ### SSE and Storage
 
-- Agent streams emit `start`, `step`, and `delta`, ending with `done` on success. On `delta_reset`, clear temporary answer text while keeping steps. Chat streams emit `delta` and `done`. Failures after stream start are returned as `error` events, and heartbeats are sent while idle.
+- Agent streams emit `start`, `step`, and `delta`, ending with `done` on success. On `delta_reset`, clear temporary answer text while keeping steps. Chat streams emit `delta` and `done` (plus `delta_reset` when falling back mid-stream). Failures after stream start are returned as `error` events, and heartbeats are sent while idle.
 - Skill and Tool `inputSchema` definitions are validated before execution. `ai.tools.serviceInvoke` maps service names to arrays of exposed method names, e.g., `{ ProjectService: ['getProjectDetail'] }`.
 - `ai.store.trace.use`, `ai.store.memory.use`, and `ai.store.vector.use` accept store instances or factories taking `ConfigService`. Multi-instance session stores can implement `MemoryStore.runTurn` to coordinate turns with a shared lock. Default file stores target single-instance deployments.
 - The knowledge base supports document listing, index deletion, rebuilds, retrieval preview, Wiki topic page reading, and chunk location. Sources can come from a file directory or MySQL, and vector indexes support file, MySQL, and Qdrant backends. Retrieval supports raw `rag`, LLM `wiki`, and `hybrid` modes (`ai.rag.mode`). See [RAG Knowledge Base](docs/agent-operations.en.md#rag-knowledge-base) for connection config and citation lookup.
@@ -257,6 +257,10 @@ export default {
 
 All model stages count toward `ai.runtime.maxIterations`, and toward the shared run-tree budget when delegation is used. Reflection requires at least four model calls to complete one revision and re-review (plus any tool-call turns). Child Agents use their own `mode`. Sync and SSE endpoints still invoke by Agent name, and `GET /api/ai/agent/graph?mode=reflection` inspects the topology of a given mode.
 
+### Structured Output (`outputSchema`)
+
+Declare `outputSchema` (JSON Schema) and optional `maxOutputRetries` (default `2`) on `AgentDefinition` to automatically inject schema instructions, validate final JSON strictly with `ajv`, and trigger bounded repair retries when output is malformed. On success, synchronous runs, SSE `done`, and Trace records return both canonical JSON string `output` and parsed `structuredOutput`; when retries are exhausted, the terminal step records `INVALID_STRUCTURED_OUTPUT`.
+
 ### Multi-Agent Delegation
 
 Configuring `delegates` on an Agent allows calling listed child Agents through the reserved `agent-delegate` tool. Parent execution steps expose `childRunId`, and child Traces include `parentRunId`, `rootRunId`, and `delegationDepth`. See [Agent Delegation Guide](docs/agent-delegation.en.md) for configuration and offline testing.
@@ -276,7 +280,7 @@ The CLI sequentially invokes the synchronous Agent endpoint to verify tool calls
 - **Missing model API key**: Verify the active environment config file exists, the environment name is set properly, and `apiKey` resolves to a valid environment variable.
 - **Business modules, Skills, or Agents not loaded**: Ensure the process starts from the business project root and compiled outputs exist at `dist/modules/`, `dist/skills/`, and `dist/agents/` matching naming conventions.
 - **Page template or static asset 404**: Check the business project's `app/public/` directory and build output; template paths must match `dist/entry.:page.tpl`.
-- **Port in use**: Port `8080` is currently fixed in `app/main.ts`; free port `8080` before starting.
+- **Port in use**: Override the default port `8080` via `PORT`, config `port`, or `serverStart({ port })`.
 
 ## Development Spec
 

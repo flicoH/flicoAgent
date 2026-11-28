@@ -161,7 +161,9 @@ describe('SDD Agent 运维能力', () => {
       assert.equal(child.output, 'child answer');
     }
     const denied = await service.run('root', 'denied', undefined, undefined, { agents: ['root'] });
-    assert.equal(denied.steps.filter(s => s.error?.code === 'DELEGATE_NOT_ALLOWED').length, 6);
+    assert.equal(denied.steps.filter(s => s.error?.code === 'DELEGATE_NOT_ALLOWED').length, 5);
+    assert.equal(denied.steps.filter(s => s.error?.code === 'DELEGATE_CYCLE').length, 1);
+    assert.equal(denied.steps.filter(s => s.childRunId).length, 0);
   });
 
   it('索引管理可定位切片；只把已检索且正文确实使用的标记变成 citations', async () => {

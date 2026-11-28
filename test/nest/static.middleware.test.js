@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { Writable } = require('stream');
-const { agentModule } = require('../../dist/agent.module');
+const { ElpisModule } = require('../../dist/elpis.module');
 
 describe('站点根静态兜底（不启动服务）', () => {
   const root = path.resolve(__dirname, '../..');
@@ -22,7 +22,7 @@ describe('站点根静态兜底（不启动服务）', () => {
     fs.writeFileSync(path.join(publicPath, 'api/ai/trace/run-id'), 'private');
     process.chdir(fixture);
     middleware = [];
-    agentModule.configureStatic({
+    ElpisModule.configureStatic({
       getHttpAdapter: () => ({ getInstance: () => ({ use: handler => middleware.push(handler) }) }),
     });
     assert.strictEqual(middleware.length, 2);

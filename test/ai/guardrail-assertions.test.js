@@ -140,7 +140,7 @@ describe('T11: Guardrail · Assertions 断言库', () => {
 
   describe('5: Orchestrator 循环前安全拦截', () => {
     it('不安全输入直接拦截：记录 type=guardrail step，不调用 Planner，返回规定合同', async () => {
-      const { OrchestratorService } = require('../../dist/ai/runtime/orchestrator.service');
+      const { LangGraphOrchestratorService } = require('../../dist/ai/runtime/langgraph/langgraph-orchestrator.service');
 
       let plannerCalled = false;
       const mockAgents = {
@@ -188,7 +188,7 @@ describe('T11: Guardrail · Assertions 断言库', () => {
         },
       };
 
-      const orchestrator = new OrchestratorService(
+      const orchestrator = new LangGraphOrchestratorService(
         mockAgents,
         mockSkills,
         mockTools,
@@ -198,6 +198,7 @@ describe('T11: Guardrail · Assertions 断言库', () => {
         mockThreadService,
         mockCheckpointService,
         mockGuardrail,
+        { get: () => 5 },
       );
 
       const result = await orchestrator.run('default', '请帮我执行 rm -rf /');
