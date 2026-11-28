@@ -6,6 +6,7 @@ import type { ExecutionResult, LlmFallbackEvent, LlmMessage, LlmToolMessage } fr
 import { CapabilityApprovalRequired, ExecutorService } from '../../tool/executor.service';
 import { isTokenUsage } from '../../trace/token-usage';
 import { sanitizeLlmFallbackMessage } from '../internal/llm-circuit-breaker';
+import { DEFAULT_TOOL_CONCURRENCY } from '../internal/load-runtime-config';
 import {
   buildStructuredOutputRepairPrompt,
   DEFAULT_MAX_OUTPUT_RETRIES,
@@ -27,6 +28,8 @@ export interface AgentGraphDeps {
   executor: ExecutorService;
   allowed?: { skills: string[]; tools: string[] };
   executeCall?: (call: LangChainToolCall, options?: { approved?: boolean }) => Promise<ExecutionResult>;
+  requiresApproval?: (call: LangChainToolCall) => boolean;
+  toolConcurrency?: number;
   takeModelCall?: () => boolean;
   runId: string;
   agentName: string;
@@ -271,7 +274,8 @@ function createReviewNode(deps: Partial<AgentGraphDeps>) {
   });
 }
 
-function buildPlanToolStep(iteration: number, toolCall: LangChainToolCall): GraphStep {
+function buildPlanToolStep(iteration: number, toolCalls: LangChainToolCall[]): GraphStep {
+  const firstCall = toolCalls[0];
   return {
     type: 'plan',
     node: 'plan',
@@ -279,10 +283,19 @@ function buildPlanToolStep(iteration: number, toolCall: LangChainToolCall): Grap
     iteration,
     output: {
       type: 'invoke',
-      name: toolCall.name,
-      input: toolCall.args,
+      name: firstCall.name,
+      input: firstCall.args,
+      ...(toolCalls.length > 1
+        ? {
+          calls: toolCalls.map(call => ({
+            id: call.id,
+            name: call.name,
+            input: call.args,
+          })),
+        }
+        : {}),
     },
-    toolCallId: toolCall.id,
+    toolCallId: firstCall.id,
     timestamp: new Date().toISOString(),
   };
 }
@@ -314,6 +327,7 @@ function buildExecutionStep(
     ...(execution.source ? { source: execution.source } : {}),
     input: toolCall.args,
     output: execution.output,
+    ...(execution.truncated ? { truncated: true } : {}),
     ...(execution.childRunId ? { childRunId: execution.childRunId } : {}),
     error: execution.error,
     toolCallId: toolCall.id,
@@ -371,9 +385,8 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
     const usage = isTokenUsage(planResult.usage) ? planResult.usage : null;
 
     if (planResult.toolCalls && planResult.toolCalls.length > 0) {
-      const firstCall = planResult.toolCalls[0];
       const planStep: GraphStep = {
-        ...buildPlanToolStep(currentIteration, firstCall),
+        ...buildPlanToolStep(currentIteration, planResult.toolCalls),
         ...(planResult.model ? { model: planResult.model } : {}),
         usage,
         modelDurationMs,
@@ -441,21 +454,65 @@ export function createPlanNode(deps?: Partial<AgentGraphDeps>) {
 }
 
 export function createExecuteNode(deps?: Partial<AgentGraphDeps>) {
+  const executeSingleCall = async (
+    call: LangChainToolCall,
+    approved: boolean,
+  ): Promise<ExecutionResult> => {
+    if (deps?.executeCall) {
+      return deps.executeCall(call, { approved });
+    }
+    return deps!.executor!.execute(
+      call.name,
+      call.args,
+      { runId: deps?.runId ?? '', agent: deps?.agentName ?? '', signal: deps?.signal },
+      deps?.allowed,
+      false,
+      { approved, checkApproval: false },
+    );
+  };
+
+  const toPendingApprovalUpdate = (
+    results: ExecutionResult[],
+    steps: GraphStep[],
+    index: number,
+    call: LangChainToolCall,
+    error: CapabilityApprovalRequired,
+  ): AgentStateUpdate => ({
+    executionResults: results,
+    steps,
+    resumeIndex: index,
+    approvedCallId: undefined,
+    rejectedCallId: undefined,
+    pendingApproval: {
+      id: randomUUID(),
+      kind: error.kind,
+      name: error.capabilityName,
+      input: error.input,
+      index,
+      callId: call.id,
+    },
+  });
+
   return async (state: AgentStateType): Promise<AgentStateUpdate> => {
     const calls = state.toolCalls ?? [];
     const results: ExecutionResult[] = [...(state.executionResults ?? [])];
     const steps: GraphStep[] = [];
     const startIndex = Math.max(0, state.resumeIndex ?? results.length);
+    const concurrency = typeof deps?.toolConcurrency === 'number'
+      && Number.isFinite(deps.toolConcurrency)
+      && deps.toolConcurrency >= 1
+      ? Math.floor(deps.toolConcurrency)
+      : DEFAULT_TOOL_CONCURRENCY;
 
-    for (let index = startIndex; index < calls.length; index++) {
+    let index = startIndex;
+    while (index < calls.length) {
       throwIfAborted(deps?.signal);
       const call = calls[index];
       const approved = Boolean(state.approvedCallId && state.approvedCallId === call.id);
       const rejected = Boolean(state.rejectedCallId && state.rejectedCallId === call.id);
 
-      let execution: ExecutionResult;
       if (rejected) {
-        execution = {
+        const execution: ExecutionResult = {
           type: 'observe',
           name: call.name,
           error: {
@@ -463,47 +520,129 @@ export function createExecuteNode(deps?: Partial<AgentGraphDeps>) {
             message: `Approval for "${call.name}" was rejected`,
           },
         };
-      } else {
-        if (!deps?.executeCall && !deps?.executor) {
-          break;
-        }
+        const step = buildExecutionStep(state.iteration, call, execution);
+        await deps?.recordStep?.(step);
+        results.push(execution);
+        steps.push(step);
+        index++;
+        continue;
+      }
+
+      if (!deps?.executeCall && !deps?.executor) {
+        break;
+      }
+
+      // 遇到需要审批的调用立即设屏障，严禁提前触发后续工具调用
+      if (!approved && deps.requiresApproval?.(call)) {
         try {
-          execution = deps.executeCall
-            ? await deps.executeCall(call, { approved })
-            : await deps.executor!.execute(
-              call.name,
-              call.args,
-              { runId: deps.runId ?? '', agent: deps.agentName ?? '', signal: deps.signal },
-              deps.allowed,
-              false,
-              { approved, checkApproval: false },
-            );
+          const execution = await executeSingleCall(call, false);
+          const step = buildExecutionStep(state.iteration, call, execution);
+          await deps?.recordStep?.(step);
+          results.push(execution);
+          steps.push(step);
+          index++;
+          continue;
         } catch (error) {
           if (error instanceof CapabilityApprovalRequired) {
-            return {
-              executionResults: results,
-              steps,
-              resumeIndex: index,
-              approvedCallId: undefined,
-              rejectedCallId: undefined,
-              pendingApproval: {
-                id: randomUUID(),
-                kind: error.kind,
-                name: error.capabilityName,
-                input: error.input,
-                index,
-                callId: call.id,
-              },
-            };
+            return toPendingApprovalUpdate(results, steps, index, call, error);
           }
           throw error;
         }
       }
 
-      const step = buildExecutionStep(state.iteration, call, execution);
-      await deps?.recordStep?.(step);
-      results.push(execution);
-      steps.push(step);
+      // 聚合当前位置起连续的、无需审批且未被拒绝的安全并发批次
+      let batchEnd = index + 1;
+      if (concurrency > 1) {
+        while (batchEnd < calls.length) {
+          const candidate = calls[batchEnd];
+          const candidateRejected = Boolean(state.rejectedCallId && state.rejectedCallId === candidate.id);
+          const candidateApproved = Boolean(state.approvedCallId && state.approvedCallId === candidate.id);
+          if (candidateRejected || (!candidateApproved && deps.requiresApproval?.(candidate))) {
+            break;
+          }
+          batchEnd++;
+        }
+      }
+
+      const batchSize = batchEnd - index;
+      if (batchSize === 1) {
+        let execution: ExecutionResult;
+        try {
+          execution = await executeSingleCall(call, approved);
+        } catch (error) {
+          if (error instanceof CapabilityApprovalRequired) {
+            return toPendingApprovalUpdate(results, steps, index, call, error);
+          }
+          throw error;
+        }
+        const step = buildExecutionStep(state.iteration, call, execution);
+        await deps?.recordStep?.(step);
+        results.push(execution);
+        steps.push(step);
+        index++;
+        continue;
+      }
+
+      // 受控并发池执行当前安全批次，并严格按原始 toolCalls 顺序回写步骤与结果
+      const batchCalls = calls.slice(index, batchEnd);
+      const batchOutcomes = new Array<{
+        execution?: ExecutionResult;
+        approvalError?: CapabilityApprovalRequired;
+      }>(batchSize);
+      let nextOffset = 0;
+      let fatalError: unknown = null;
+      let hasFatalError = false;
+
+      const workerCount = Math.min(concurrency, batchSize);
+      const runWorker = async () => {
+        while (true) {
+          if (hasFatalError || deps?.signal?.aborted) {
+            return;
+          }
+          const offset = nextOffset++;
+          if (offset >= batchSize) {
+            return;
+          }
+          const item = batchCalls[offset];
+          const itemApproved = Boolean(state.approvedCallId && state.approvedCallId === item.id);
+          try {
+            const execution = await executeSingleCall(item, itemApproved);
+            batchOutcomes[offset] = { execution };
+          } catch (error) {
+            if (error instanceof CapabilityApprovalRequired) {
+              batchOutcomes[offset] = { approvalError: error };
+            } else {
+              if (!hasFatalError) {
+                hasFatalError = true;
+                fatalError = error;
+              }
+              return;
+            }
+          }
+        }
+      };
+
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+      throwIfAborted(deps?.signal);
+      if (hasFatalError) {
+        throw fatalError;
+      }
+
+      for (let offset = 0; offset < batchSize; offset++) {
+        const outcome = batchOutcomes[offset];
+        const item = batchCalls[offset];
+        if (outcome?.approvalError) {
+          return toPendingApprovalUpdate(results, steps, index + offset, item, outcome.approvalError);
+        }
+        if (outcome?.execution) {
+          const step = buildExecutionStep(state.iteration, item, outcome.execution);
+          await deps?.recordStep?.(step);
+          results.push(outcome.execution);
+          steps.push(step);
+        }
+      }
+
+      index = batchEnd;
     }
 
     return {

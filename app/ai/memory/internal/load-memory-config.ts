@@ -1,36 +1,69 @@
 import { resolve } from 'node:path';
+import type { MemorySummarizationOptions } from '../../../config/bootstrap-options';
 import { ConfigService } from '../../../config/config.service';
 
-/**
- * 根配置结构映射
- */
+export const DEFAULT_MEMORY_MAX_TURNS = 20;
+export const DEFAULT_SUMMARY_TRIGGER_TOKENS = 4000;
+export const DEFAULT_SUMMARY_KEEP_RECENT_MESSAGES = 6;
+export const DEFAULT_SUMMARY_MAX_CHARS = 2000;
+
+export interface ResolvedMemorySummarizationOptions {
+  enabled: boolean;
+  model?: string;
+  triggerTokens: number;
+  keepRecentMessages: number;
+  maxSummaryChars: number;
+}
+
+interface MemoryConfigLike {
+  path?: string;
+  maxTurns?: number;
+  maxContextTokens?: number;
+  summarization?: MemorySummarizationOptions;
+  threadEnabled?: boolean;
+}
+
 interface AiConfig {
   store?: {
-    memory?: {
-      path?: string;
-      maxTurns?: number;
-    } | string;
+    memory?: MemoryConfigLike | string;
   };
-  memory?: {
-    path?: string;
-    maxTurns?: number;
-  };
+  memory?: MemoryConfigLike;
+}
+
+function parsePositiveInt(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+    return Math.floor(value);
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value.trim());
+    if (Number.isFinite(parsed) && parsed > 0) {
+      return Math.floor(parsed);
+    }
+  }
+  return undefined;
+}
+
+function readMemoryConfigSections(config?: ConfigService): {
+  storeMemory?: MemoryConfigLike;
+  directMemory?: MemoryConfigLike;
+} {
+  if (!config) {
+    return {};
+  }
+  const ai = config.get<AiConfig>('ai');
+  const rawStoreMem = ai?.store?.memory ?? config.get<unknown>('ai.store.memory');
+  const storeMemory = rawStoreMem && typeof rawStoreMem === 'object' ? (rawStoreMem as MemoryConfigLike) : undefined;
+  const rawDirectMem = ai?.memory ?? config.get<unknown>('ai.memory');
+  const directMemory = rawDirectMem && typeof rawDirectMem === 'object' ? (rawDirectMem as MemoryConfigLike) : undefined;
+  return { storeMemory, directMemory };
 }
 
 /**
  * 解析 Memory 会话检查点存储目录的绝对物理路径
- *
- * 【解析优先级纪律】
- * 优先读取 `ai.store.memory.path`（若为对象读其 path 属性，若为字符串直接使用）；
- * 缺省回退至业务工程相对路径 `data/memory`。
- *
- * @param config 全局配置服务
- * @returns 会话记忆保存目录绝对路径
  */
 export function resolveMemoryPath(config: ConfigService): string {
   const ai = config.get<AiConfig>('ai');
 
-  // 1. 读 ai.store.memory.path 或 ai.store.memory
   const memoryStore = ai?.store?.memory ?? config.get<unknown>('ai.store.memory');
   if (typeof memoryStore === 'string' && memoryStore.trim()) {
     return resolve(process.cwd(), memoryStore.trim());
@@ -42,54 +75,86 @@ export function resolveMemoryPath(config: ConfigService): string {
     }
   }
 
-  // 2. 缺省读 ai.memory.path
   const directPath = ai?.memory?.path ?? config.get<string>('ai.memory.path');
   if (typeof directPath === 'string' && directPath.trim()) {
     return resolve(process.cwd(), directPath.trim());
   }
 
-  // 3. 默认回退
   return resolve(process.cwd(), 'data/memory');
 }
 
 /**
  * 解析 Memory 会话滑动窗口最大保留消息条数 (maxTurns)
- *
- * 【约束规范】
- * 1. 从 `ai.store.memory.maxTurns` 读取；
- * 2. 缺省为 20；
- * 3. 非数字、NaN、无限大或 <= 0 时，一律安全回退到 20（禁止「没配就不截断」）；
- * 4. maxTurns 为单条消息条数计数（一条 user 或一条 assistant 各算 1）。
- *
- * @param config 全局配置服务
- * @returns 截断滑动窗口大小（固定正整数，默认 20）
  */
-export function resolveMemoryMaxTurns(config: ConfigService): number {
-  const ai = config.get<AiConfig>('ai');
-
-  const configured = (ai?.store?.memory as any)?.maxTurns
+export function resolveMemoryMaxTurns(config?: ConfigService): number {
+  if (!config) {
+    return DEFAULT_MEMORY_MAX_TURNS;
+  }
+  const { storeMemory, directMemory } = readMemoryConfigSections(config);
+  const configured = storeMemory?.maxTurns
     ?? config.get<unknown>('ai.store.memory.maxTurns')
-    ?? ai?.memory?.maxTurns
+    ?? directMemory?.maxTurns
     ?? config.get<unknown>('ai.memory.maxTurns');
 
-  const val = Number(configured);
-  if (Number.isFinite(val) && val > 0) {
-    return Math.floor(val);
-  }
+  return parsePositiveInt(configured) ?? DEFAULT_MEMORY_MAX_TURNS;
+}
 
-  return 20;
+/**
+ * 解析历史上下文估算 Token 预算上限（未配置时返回 undefined，不启用 Token 预算裁剪）
+ */
+export function resolveMemoryMaxContextTokens(config?: ConfigService): number | undefined {
+  if (!config) {
+    return undefined;
+  }
+  const { storeMemory, directMemory } = readMemoryConfigSections(config);
+  const configured = storeMemory?.maxContextTokens
+    ?? config.get<unknown>('ai.store.memory.maxContextTokens')
+    ?? directMemory?.maxContextTokens
+    ?? config.get<unknown>('ai.memory.maxContextTokens');
+
+  return parsePositiveInt(configured);
+}
+
+/**
+ * 解析历史对话自动摘要压缩配置
+ */
+export function resolveMemorySummarizationOptions(config?: ConfigService): ResolvedMemorySummarizationOptions {
+  const maxContextTokens = resolveMemoryMaxContextTokens(config);
+  if (!config) {
+    return {
+      enabled: false,
+      triggerTokens: maxContextTokens ?? DEFAULT_SUMMARY_TRIGGER_TOKENS,
+      keepRecentMessages: DEFAULT_SUMMARY_KEEP_RECENT_MESSAGES,
+      maxSummaryChars: DEFAULT_SUMMARY_MAX_CHARS,
+    };
+  }
+  const { storeMemory, directMemory } = readMemoryConfigSections(config);
+  const raw = (storeMemory?.summarization
+    ?? config.get<MemorySummarizationOptions>('ai.store.memory.summarization')
+    ?? directMemory?.summarization
+    ?? config.get<MemorySummarizationOptions>('ai.memory.summarization')) as MemorySummarizationOptions | undefined;
+
+  const model = typeof raw?.model === 'string' && raw.model.trim() ? raw.model.trim() : undefined;
+  const triggerTokens = parsePositiveInt(raw?.triggerTokens)
+    ?? maxContextTokens
+    ?? DEFAULT_SUMMARY_TRIGGER_TOKENS;
+  const keepRecentMessages = Math.max(
+    2,
+    parsePositiveInt(raw?.keepRecentMessages) ?? DEFAULT_SUMMARY_KEEP_RECENT_MESSAGES,
+  );
+  const maxSummaryChars = parsePositiveInt(raw?.maxSummaryChars) ?? DEFAULT_SUMMARY_MAX_CHARS;
+
+  return {
+    enabled: raw?.enabled === true,
+    ...(model ? { model } : {}),
+    triggerTokens,
+    keepRecentMessages,
+    maxSummaryChars,
+  };
 }
 
 /**
  * 解析是否启用多轮会话线程与 Checkpoint 记忆保持 (threadEnabled)
- *
- * 【解析优先级纪律】
- * 1. 优先读取 `agentConfig.threadEnabled`（对齐 elpis 全局配置机制，支持 local/beta/prod 覆盖）；
- * 2. 次级读取 `ai.agentConfig.threadEnabled` 或 `ai.store.memory.threadEnabled`；
- * 3. 缺省返回 true（默认开启会话上下文保持）。
- *
- * @param config 全局配置服务
- * @returns 是否启用线程记忆
  */
 export function resolveThreadEnabled(config: ConfigService): boolean {
   const fromAgent = config.get<unknown>('agentConfig.threadEnabled');
@@ -102,13 +167,14 @@ export function resolveThreadEnabled(config: ConfigService): boolean {
     return fromAiAgent;
   }
 
-  const ai = config.get<AiConfig>('ai');
-  const fromMemory = (ai?.store?.memory as any)?.threadEnabled
-    ?? config.get<unknown>('ai.store.memory.threadEnabled');
+  const { storeMemory, directMemory } = readMemoryConfigSections(config);
+  const fromMemory = storeMemory?.threadEnabled
+    ?? config.get<unknown>('ai.store.memory.threadEnabled')
+    ?? directMemory?.threadEnabled
+    ?? config.get<unknown>('ai.memory.threadEnabled');
   if (typeof fromMemory === 'boolean') {
     return fromMemory;
   }
 
   return true;
 }
-

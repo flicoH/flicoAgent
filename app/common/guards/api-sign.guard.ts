@@ -16,7 +16,7 @@ import type { AgentRunAccess } from '../../ai/contracts';
 import { ConfigService } from '../../config/config.service';
 import { DatabaseProvider } from '../../extend/database.provider';
 
-const agentRoute = /^\/api\/ai\/(?:agent\/(?:run(?:\/stream)?|runs(?:\/[^/]+(?:\/(?:events|cancel|approval))?)?)|trace\/[^/]+(?:\/usage)?|chat(?:\/stream)?|skill\/[^/]+\/invoke)\/?$/i;
+const agentRoute = /^\/api\/ai\/(?:agent\/(?:run(?:\/stream)?|runs(?:\/[^/]+(?:\/(?:events|cancel|approval))?)?)|trace\/[^/]+(?:\/usage)?|chat(?:\/stream)?|skill\/[^/]+\/invoke|threads(?:\/[^/]+(?:\/clear)?)?)\/?$/i;
 const ragRoute = /^\/api\/ai\/rag\/(?:documents|rebuild|preview|chunk|wiki\/(?:pages|page))\/?$/i;
 const signingWindowMs = 5 * 60 * 1000;
 const REQUEST_VERIFIED = Symbol('ApiSignGuardVerified');

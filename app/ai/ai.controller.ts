@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   ForbiddenException,
   Get,
   HttpCode,
@@ -10,9 +11,11 @@ import {
   NotFoundException,
   Optional,
   Param,
+  Patch,
   Post,
   Query,
   Req,
+  RequestTimeoutException,
   Res,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
@@ -28,7 +31,18 @@ import {
   RuntimeEvent,
 } from './contracts';
 import { resolveGuardrailRuleSet } from './guardrail/internal/load-guardrail-config';
-import { resolveMemoryMaxTurns, resolveThreadEnabled } from './memory/internal/load-memory-config';
+import { CheckpointService } from './memory/checkpoint.service';
+import {
+  resolveMemoryMaxContextTokens,
+  resolveMemoryMaxTurns,
+  resolveMemorySummarizationOptions,
+  resolveThreadEnabled,
+} from './memory/internal/load-memory-config';
+import {
+  computeScopedCheckpointId,
+  isScopedCheckpointKey,
+} from './memory/internal/token-budget';
+import { ThreadService } from './memory/thread.service';
 import { resolveRagOptions } from './rag/internal/load-rag-config';
 import {
   readLlmConfig,
@@ -36,7 +50,7 @@ import {
   resolveLlm,
   resolveLlmCandidates,
 } from './runtime/internal/load-llm-config';
-import { resolveMaxIterations } from './runtime/internal/load-runtime-config';
+import { resolveMaxIterations, resolveToolConcurrency } from './runtime/internal/load-runtime-config';
 import {
   LangChainPlannerService,
   toLangChainMessages,
@@ -49,8 +63,14 @@ import { SkillScannerService } from './skill/skill-scanner.service';
 import {
   CapabilityApprovalRequired,
   CapabilityInputInvalid,
+  CapabilityTimeoutError,
   ExecutorService,
 } from './tool/executor.service';
+import {
+  resolveHttpToolOptions,
+  resolveSqlToolOptions,
+  resolveToolGuardOptions,
+} from './tool/internal/load-tools-config';
 import { ToolRegistryService } from './tool/tool-registry.service';
 import { TraceService } from './trace/trace.service';
 
@@ -161,6 +181,8 @@ export class AiController {
     @Optional() private readonly skills?: SkillScannerService,
     @Optional() private readonly executor?: ExecutorService,
     @Optional() private readonly planner?: LangChainPlannerService,
+    @Optional() private readonly threadService?: ThreadService,
+    @Optional() private readonly checkpointService?: CheckpointService,
   ) {}
 
   @Post('chat')
@@ -483,8 +505,158 @@ export class AiController {
       if (error instanceof CapabilityInputInvalid) {
         throw new BadRequestException(error.message);
       }
+      if (error instanceof CapabilityTimeoutError) {
+        throw new RequestTimeoutException(error.message);
+      }
       throw error;
     }
+  }
+
+  @Get('threads')
+  async listThreads(
+    @Query('limit') rawLimit?: unknown,
+    @Query('offset') rawOffset?: unknown,
+    @Req() request?: Request,
+  ) {
+    if (!this.checkpointService || !this.threadService) {
+      throw new NotFoundException('Thread memory service is unavailable');
+    }
+    const limit = parseNonNegativeInt(rawLimit, 20, 100, 'limit');
+    if (limit < 1) {
+      throw new BadRequestException('Invalid limit');
+    }
+    const offset = parseNonNegativeInt(rawOffset, 0, 100_000, 'offset');
+    const access = request?.agentRunAccess;
+    const checkpoints = await this.checkpointService.list({
+      scope: access?.scope,
+      offset,
+      limit,
+    });
+    return {
+      success: true as const,
+      data: {
+        limit,
+        offset,
+        items: checkpoints.map(cp => this.threadService!.toThreadSummary(cp)),
+      },
+    };
+  }
+
+  @Get('threads/:threadId')
+  async getThread(
+    @Param('threadId') threadId: string,
+    @Req() request?: Request,
+  ) {
+    if (!this.checkpointService || !this.threadService) {
+      throw new NotFoundException('Thread memory service is unavailable');
+    }
+    const { checkpointId } = this.resolveThreadKey(threadId, request?.agentRunAccess);
+    const checkpoint = await this.checkpointService.load(checkpointId);
+    if (!checkpoint || checkpoint.scope !== request?.agentRunAccess?.scope) {
+      throw new NotFoundException(`Thread "${threadId}" does not exist`);
+    }
+    return {
+      success: true as const,
+      data: this.threadService.toThreadDetail(checkpoint),
+    };
+  }
+
+  @Patch('threads/:threadId')
+  async updateThread(
+    @Param('threadId') threadId: string,
+    @Body() body: { title?: unknown },
+    @Req() request?: Request,
+  ) {
+    if (!this.checkpointService || !this.threadService) {
+      throw new NotFoundException('Thread memory service is unavailable');
+    }
+    if (!body || typeof body !== 'object' || typeof body.title !== 'string' || !body.title.trim() || body.title.trim().length > 200) {
+      throw new BadRequestException('title must be a non-empty string up to 200 characters');
+    }
+    const nextTitle = body.title.trim();
+    const access = request?.agentRunAccess;
+    const { checkpointId } = this.resolveThreadKey(threadId, access);
+
+    const updated = await this.checkpointService.runTurn(checkpointId, async () => {
+      const checkpoint = await this.checkpointService!.load(checkpointId);
+      if (!checkpoint || checkpoint.scope !== access?.scope) {
+        throw new NotFoundException(`Thread "${threadId}" does not exist`);
+      }
+      const next = {
+        ...checkpoint,
+        title: nextTitle,
+        updatedAt: Math.max(Date.now(), (checkpoint.updatedAt || 0) + 1),
+      };
+      await this.checkpointService!.save(next);
+      return next;
+    });
+
+    return {
+      success: true as const,
+      data: this.threadService.toThreadSummary(updated),
+    };
+  }
+
+  @Post('threads/:threadId/clear')
+  @HttpCode(HttpStatus.OK)
+  async clearThread(
+    @Param('threadId') threadId: string,
+    @Req() request?: Request,
+  ) {
+    if (!this.checkpointService || !this.threadService) {
+      throw new NotFoundException('Thread memory service is unavailable');
+    }
+    const access = request?.agentRunAccess;
+    const { checkpointId } = this.resolveThreadKey(threadId, access);
+
+    const cleared = await this.checkpointService.runTurn(checkpointId, async () => {
+      const checkpoint = await this.checkpointService!.load(checkpointId);
+      if (!checkpoint || checkpoint.scope !== access?.scope) {
+        throw new NotFoundException(`Thread "${threadId}" does not exist`);
+      }
+      const next = {
+        ...checkpoint,
+        messages: [],
+        summary: undefined,
+        summarizedCount: 0,
+        updatedAt: Math.max(Date.now(), (checkpoint.updatedAt || 0) + 1),
+      };
+      await this.checkpointService!.save(next);
+      return next;
+    });
+
+    return {
+      success: true as const,
+      data: this.threadService.toThreadSummary(cleared),
+    };
+  }
+
+  @Delete('threads/:threadId')
+  async deleteThread(
+    @Param('threadId') threadId: string,
+    @Req() request?: Request,
+  ) {
+    if (!this.checkpointService || !this.threadService) {
+      throw new NotFoundException('Thread memory service is unavailable');
+    }
+    const access = request?.agentRunAccess;
+    const { publicThreadId, checkpointId } = this.resolveThreadKey(threadId, access);
+
+    await this.checkpointService.runTurn(checkpointId, async () => {
+      const checkpoint = await this.checkpointService!.load(checkpointId);
+      if (!checkpoint || checkpoint.scope !== access?.scope) {
+        throw new NotFoundException(`Thread "${threadId}" does not exist`);
+      }
+      await this.checkpointService!.delete(checkpointId);
+    });
+
+    return {
+      success: true as const,
+      data: {
+        threadId: publicThreadId,
+        deleted: true,
+      },
+    };
   }
 
   @Get('agent/graph')
@@ -574,11 +746,46 @@ export class AiController {
       ? resolveCircuitBreakerConfig(this.configService, llmFallbacks.length > 0)
       : undefined;
 
+    const toolGuard = resolveToolGuardOptions(this.configService);
+    const httpTool = resolveHttpToolOptions(this.configService);
+    const sqlTool = resolveSqlToolOptions(this.configService);
+    const memoryMaxContextTokens = resolveMemoryMaxContextTokens(this.configService);
+    const memorySummarization = resolveMemorySummarizationOptions(this.configService);
+
     return {
       threadEnabled: resolveThreadEnabled(this.configService),
       maxIterations: resolveMaxIterations(this.configService),
+      toolConcurrency: resolveToolConcurrency(this.configService),
       memory: {
         maxTurns: resolveMemoryMaxTurns(this.configService),
+        ...(memoryMaxContextTokens !== undefined ? { maxContextTokens: memoryMaxContextTokens } : {}),
+        ...(memorySummarization.enabled ? {
+          summarization: {
+            enabled: true,
+            ...(memorySummarization.model ? { model: memorySummarization.model } : {}),
+            triggerTokens: memorySummarization.triggerTokens,
+            keepRecentMessages: memorySummarization.keepRecentMessages,
+            maxSummaryChars: memorySummarization.maxSummaryChars,
+          },
+        } : {}),
+      },
+      tools: {
+        timeoutMs: toolGuard.timeoutMs,
+        maxOutputChars: toolGuard.maxOutputChars,
+        http: {
+          enabled: httpTool.enabled,
+          allowedHosts: httpTool.allowedHosts,
+          allowedMethods: httpTool.allowedMethods,
+          allowPrivateNetworks: httpTool.allowPrivateNetworks,
+          timeoutMs: httpTool.timeoutMs,
+          maxResponseBytes: httpTool.maxResponseBytes,
+        },
+        sql: {
+          enabled: sqlTool.enabled,
+          maxRows: sqlTool.maxRows,
+          timeoutMs: sqlTool.timeoutMs,
+          ...(sqlTool.allowedTables.length ? { allowedTables: sqlTool.allowedTables } : {}),
+        },
       },
       llm: {
         default: defaultLlm,
@@ -645,6 +852,23 @@ export class AiController {
 
   private sendSseEvent(response: Response, event: string, data: unknown): void {
     response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  }
+
+  private resolveThreadKey(
+    threadId: string,
+    access?: AgentRunAccess,
+  ): { publicThreadId: string; checkpointId: string } {
+    if (typeof threadId !== 'string' || !ID_PATTERN.test(threadId.trim())) {
+      throw new BadRequestException('Invalid threadId');
+    }
+    const publicThreadId = threadId.trim();
+    if (access?.scope === undefined && isScopedCheckpointKey(publicThreadId)) {
+      throw new BadRequestException('Invalid threadId');
+    }
+    return {
+      publicThreadId,
+      checkpointId: computeScopedCheckpointId(access?.scope, publicThreadId),
+    };
   }
 
   private async findTraceOrThrow(runId: string, access?: AgentRunAccess) {

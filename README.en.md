@@ -261,6 +261,17 @@ All model stages count toward `ai.runtime.maxIterations`, and toward the shared 
 
 Declare `outputSchema` (JSON Schema) and optional `maxOutputRetries` (default `2`) on `AgentDefinition` to automatically inject schema instructions, validate final JSON strictly with `ajv`, and trigger bounded repair retries when output is malformed. On success, synchronous runs, SSE `done`, and Trace records return both canonical JSON string `output` and parsed `structuredOutput`; when retries are exhausted, the terminal step records `INVALID_STRUCTURED_OUTPUT`.
 
+### Parallel Tool Execution & Built-in General Toolkit
+
+- **Bounded Parallel Tool Calls**: Multi-call turns (including concurrent `agent-delegate` sub-agents) run with bounded concurrency (`ai.runtime.toolConcurrency` or per-Agent `toolConcurrency`, default `4`), placing an automatic concurrency barrier before any approval-required capability and persisting steps/observations in deterministic original order.
+- **Unified Timeout & Output Truncation**: All Skills, built-in Tools, and MCP Tools are guarded by `ai.tools.timeoutMs` (default `30000`, returning `TOOL_TIMEOUT`) and `ai.tools.maxOutputChars` (default `16000`, flagging `truncated: true`), with per-capability overrides.
+- **Built-in General Tools**: Alongside `retrieve` and `service-invoke`, adds SSRF-hardened `http-request` (default-deny host/method allowlists, private-network blocking, redirect re-validation, streaming byte cap), read-only `sql-query` (single-statement read-only SQL check, CTE-aware table ACL, row limit), and zero-`eval` `calculator`.
+
+### Token-Budget Memory, Summarization & Thread Management APIs
+
+- **Token Budget & Incremental Summarization**: Configure `maxContextTokens` and `summarization: { enabled: true }` under `ai.store.memory` (or `ai.memory`) to trim historical turns by multilingual token budget and incrementally summarize older turns into persistent `summary` state (automatically injected as context on subsequent turns, with graceful fallback on summarizer failure).
+- **Scoped Thread Management APIs**: Exposes `GET /api/ai/threads`, `GET /api/ai/threads/:threadId`, `PATCH /api/ai/threads/:threadId`, `POST /api/ai/threads/:threadId/clear`, and `DELETE /api/ai/threads/:threadId` with strict `scope` isolation across File, MySQL, and Redis `MemoryStore` drivers.
+
 ### Multi-Agent Delegation
 
 Configuring `delegates` on an Agent allows calling listed child Agents through the reserved `agent-delegate` tool. Parent execution steps expose `childRunId`, and child Traces include `parentRunId`, `rootRunId`, and `delegationDepth`. See [Agent Delegation Guide](docs/agent-delegation.en.md) for configuration and offline testing.

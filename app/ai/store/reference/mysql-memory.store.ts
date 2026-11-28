@@ -1,6 +1,6 @@
 import type Knex from 'knex';
 import { createHash } from 'node:crypto';
-import type { MemoryStore, ThreadCheckpoint } from '../store.interface';
+import type { MemoryListQuery, MemoryStore, ThreadCheckpoint } from '../store.interface';
 
 const memoryTable = 'flico_ai_memory';
 
@@ -67,6 +67,31 @@ export class MysqlMemoryStore implements MemoryStore {
       .where('thread_key', sha256(cleanId))
       .first('payload');
     return row ? (JSON.parse(row.payload) as ThreadCheckpoint) : null;
+  }
+
+  async list(query: MemoryListQuery): Promise<ThreadCheckpoint[]> {
+    const offset = Math.max(0, Math.floor(query.offset || 0));
+    const limit = Math.max(0, Math.floor(query.limit || 0));
+    if (limit === 0) return [];
+
+    const rows = await this.database<MemoryRow>(memoryTable)
+      .where('namespace_key', this.namespaceKey)
+      .orderBy('updated_at', 'desc')
+      .select('payload');
+
+    const matched: ThreadCheckpoint[] = [];
+    for (const row of rows) {
+      if (!row?.payload) continue;
+      try {
+        const checkpoint = JSON.parse(row.payload) as ThreadCheckpoint;
+        if (!checkpoint || checkpoint.scope !== query.scope) continue;
+        matched.push(checkpoint);
+        if (matched.length >= offset + limit) break;
+      } catch {
+        // 忽略无法解析的损坏记录
+      }
+    }
+    return matched.slice(offset, offset + limit);
   }
 
   async delete(threadId: string): Promise<void> {

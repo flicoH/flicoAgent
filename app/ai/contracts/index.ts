@@ -53,6 +53,8 @@ export interface ExecutionResult {
   childRunId?: string;
   /** 成功执行后的输出结果 */
   output?: unknown;
+  /** 输出超出 maxOutputChars 上限时标注为 true */
+  truncated?: boolean;
   /** 结构化错误信息（不向循环外抛出异常，而是让下一轮模型感知并自愈） */
   error?: {
     code: string;
@@ -215,6 +217,8 @@ export interface Step {
   input?: unknown;
   /** 输出数据 */
   output?: unknown;
+  /** 输出是否因超过 maxOutputChars 上限而被截断 */
+  truncated?: boolean;
   /** 结构化错误信息 */
   error?: {
     code: string;
@@ -433,11 +437,55 @@ export interface EmbeddingProvider {
   embed(texts: string[]): Promise<number[][]>;
 }
 
+export interface ThreadSummary {
+  threadId: string;
+  title?: string;
+  agent?: string;
+  messageCount: number;
+  summarizedCount: number;
+  hasSummary: boolean;
+  estimatedTokens: number;
+  createdAt?: number;
+  updatedAt: number;
+}
+
+export interface ThreadDetail extends ThreadSummary {
+  summary?: string;
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>;
+}
+
 export interface AgentConfigResponse {
   threadEnabled: boolean;
   maxIterations: number;
+  toolConcurrency?: number;
   memory: {
     maxTurns: number;
+    maxContextTokens?: number;
+    summarization?: {
+      enabled: boolean;
+      model?: string;
+      triggerTokens: number;
+      keepRecentMessages: number;
+      maxSummaryChars: number;
+    };
+  };
+  tools?: {
+    timeoutMs: number;
+    maxOutputChars: number;
+    http: {
+      enabled: boolean;
+      allowedHosts: string[];
+      allowedMethods: string[];
+      allowPrivateNetworks: boolean;
+      timeoutMs: number;
+      maxResponseBytes: number;
+    };
+    sql: {
+      enabled: boolean;
+      maxRows: number;
+      timeoutMs: number;
+      allowedTables?: string[];
+    };
   };
   llm: {
     default: string | null;

@@ -12,6 +12,11 @@
 | `GET /agent/runs/:runId/events?after=0` | SSE 重放已持久化的步骤，再追踪进度。重连时将最后收到的 `sequence` 作为 `after` |
 | `POST /agent/runs/:runId/cancel` | 取消排队、运行或待审批的任务 |
 | `POST /agent/runs/:runId/approval` | 传 `{ approvalId, approved }`；授权需包含 `approve: true` |
+| `GET /threads?limit=20&offset=0` | 分页列出当前 `scope` 的会话线程摘要（标题、消息数、摘要状态与估算 Token） |
+| `GET /threads/:threadId` | 查看指定线程的历史消息列表与压缩摘要 |
+| `PATCH /threads/:threadId` | 传 `{ title }` 更新线程标题 |
+| `POST /threads/:threadId/clear` | 清空线程历史消息与摘要，保留线程元数据 |
+| `DELETE /threads/:threadId` | 删除线程及其持久化记忆 |
 | `GET /rag/documents` | 列出当前知识来源已索引的文档和切片数 |
 | `DELETE /rag/documents` | 传 `{ docId }` 删除索引切片，保留原文 |
 | `POST /rag/rebuild` | 按当前来源、切分和向量化配置重建索引 |
@@ -326,3 +331,89 @@ export default {
 - **结果返回**：校验通过后，同步接口、`POST /api/ai/agent/run/stream` 的 `done` 事件、Trace 及运行详情同时返回规范 JSON 字符串 `output` 与已解析对象 `structuredOutput`。
 - **失败保护**：达到重试上限或模型调用预算仍未通过校验时，不会返回非法 `structuredOutput`，并在终态 `final` 步骤（`node: "validate-output"`）记录 `error.code = "INVALID_STRUCTURED_OUTPUT"`。
 - **流式与模式兼容**：统一覆盖 `react`、`plan-and-execute` 与 `reflection` 三种模式；校验通过前不会向 SSE 提前推送未校验或带 Markdown 代码块围栏的临时 `delta`。
+
+## 并行工具调用、超时截断与内置通用工具包
+
+### 同轮受控并发（`toolConcurrency`）
+
+当模型在单轮规划中返回多个 `tool_calls`（含多个 `agent-delegate` 子 Agent 委派）时，编排器按受控并发池并行调度连续的无需人工审批调用，并严格按原始 `tool_calls` 顺序回写步骤与观察消息：
+
+- **配置优先级**：`AgentDefinition.toolConcurrency` > 全局 `ai.runtime.toolConcurrency` > 默认值 `4`（设为 `1` 时强制串行）。
+- **审批屏障安全**：遇到声明 `approval: 'required'` 的能力前自动设立并发屏障，绝不提前执行审批点之后的后续调用；审批通过或拒绝后从 `resumeIndex` 无缝续跑。
+- **取消与预算安全**：`AbortSignal` 自动级联到批次内所有在途调用；并发委派共享运行树模型与子运行预算，扣减严格防超发。
+
+### 统一工具级超时与超大输出截断
+
+所有 Skill、内置 Tool 与 MCP Tool 均由 `ExecutorService` 统一实施超时与输出截断保护，优先级为 **能力自身声明（`timeoutMs` / `maxOutputChars`） > 全局 `ai.tools.*` > 框架默认值**：
+
+| 配置项 | 说明 | 默认值 |
+| --- | --- | --- |
+| `ai.tools.timeoutMs` | 单次工具/技能执行超时（毫秒），超时触发 `error.code = "TOOL_TIMEOUT"` 观察错误并中止子 `AbortSignal`；直调 Skill 映射为 HTTP `408` | `30000` |
+| `ai.tools.maxOutputChars` | 单次执行输出最大字符数；超限时自动截断（对象/数组转为 `{ truncated: true, originalChars, maxOutputChars, preview }` 信封）并在步骤标注 `truncated: true` | `16000` |
+
+### 内置通用工具包
+
+除 `retrieve` 与 `service-invoke` 外，框架内置了以下三个通用工具（需在 Agent 声明的 `tools` 白名单中显式启用）：
+
+| 工具名 | 用途 | 安全策略与关键配置 |
+| --- | --- | --- |
+| `http-request` | 受控 HTTP 请求 | **默认拒绝**：须配置 `ai.tools.http.allowedHosts`（支持 `*.domain.com`）；默认仅允许 `GET`/`HEAD`；默认 `allowPrivateNetworks: false` 拦截 `localhost`、私网 IP 及解析到私网的 DNS；手动跟踪重定向并逐跳复检；支持 `maxResponseBytes` 流式截断、`defaultHeaders` 与 `approval: 'required'` |
+| `sql-query` | 受控只读 SQL 查询 | **默认关闭**：须配置 `ai.tools.sql.enabled: true`；仅允许单条 `SELECT`/`WITH`/`SHOW`/`DESCRIBE`/`EXPLAIN`，禁止注释、多语句与所有写/DDL/锁/延时关键字；支持 `allowedTables`、`deniedTables`（自动识别 CTE 别名）、参数化 `params`、`maxRows`（默认 `100`，上限 `1000`）与自定义 `executor` |
+| `calculator` | 安全数学表达式计算 | 零 `eval` / `Function` 递归下降解析器，支持 `+ - * / % ^`、`PI`/`E`、`abs`/`round`/`sqrt`/`pow`/`min`/`max`/`clamp` 等函数及 `variables` 数值映射 |
+
+```js
+module.exports = {
+  ai: {
+    runtime: {
+      toolConcurrency: 4,
+    },
+    tools: {
+      timeoutMs: 30_000,
+      maxOutputChars: 16_000,
+      http: {
+        allowedHosts: ['api.example.com', '*.internal.example.com'],
+        allowedMethods: ['GET', 'POST'],
+        allowPrivateNetworks: false,
+        timeoutMs: 10_000,
+        maxResponseBytes: 262_144,
+        defaultHeaders: { 'x-client': 'flico-agent' },
+      },
+      sql: {
+        enabled: true,
+        allowedTables: ['orders', 'order_items'],
+        deniedTables: ['users_secrets'],
+        maxRows: 100,
+        timeoutMs: 8_000,
+      },
+    },
+  },
+};
+```
+
+## Token 预算裁剪、历史摘要压缩与线程管理
+
+在既有 `maxTurns`（默认 `20`）条数滑窗基础上，支持配置 **Token 预算裁剪（`maxContextTokens`）** 与 **增量历史摘要压缩（`summarization`）**，避免超长对话截断导致早期约束与上下文丢失：
+
+```js
+module.exports = {
+  ai: {
+    store: {
+      memory: {
+        maxTurns: 20,
+        maxContextTokens: 3000,
+        summarization: {
+          enabled: true,
+          model: 'qwen',          // 可选，缺省沿用 ai.llm.default
+          triggerTokens: 2400,    // 缺省优先取 maxContextTokens，否则 4000
+          keepRecentMessages: 6,  // 压缩时原样保留最近 6 条原文消息（默认 6，最小 2）
+          maxSummaryChars: 2000,  // 单份摘要最大字符上限（默认 2000）
+        },
+      },
+    },
+  },
+};
+```
+
+- **Token 预算裁剪**：构造历史上下文时先扣除已有摘要所占 Token，再从最新消息逆序保留近期原文，并自动避免孤立 `assistant` 消息打头。
+- **增量摘要与降级**：当开启 `summarization.enabled: true` 且消息数超过 `keepRecentMessages`、同时触达 `maxTurns` 或 `triggerTokens` 时，自动通过 `LangChainPlannerService.chat` 将较早对话与旧摘要增量合并，保留用户约束、偏好与关键实体；若摘要模型临时故障，自动降级为标准滑窗截断，绝不中断已完成的主运行。
+- **线程管理接口**：`GET /api/ai/threads`、`GET /api/ai/threads/:threadId`、`PATCH /api/ai/threads/:threadId`、`POST /api/ai/threads/:threadId/clear` 与 `DELETE /api/ai/threads/:threadId` 均走现有 AI 验签/会话授权并严格按 `scope` 隔离（跨 `scope` 返回 `404`），写操作自动走同线程 `runTurn` 串行锁。内置 File、MySQL、Redis 三套 `MemoryStore` 均已支持按 `scope` 分页列举。

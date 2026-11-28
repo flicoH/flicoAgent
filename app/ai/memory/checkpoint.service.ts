@@ -1,14 +1,47 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { MEMORY_STORE, MemoryStore, ThreadCheckpoint } from '../store/store.interface';
+import {
+  MEMORY_STORE,
+  MemoryListQuery,
+  MemoryStore,
+  ThreadCheckpoint,
+} from '../store/store.interface';
+
+function sanitizeCheckpoint(checkpoint: ThreadCheckpoint): ThreadCheckpoint {
+  const cleanMessages = Array.isArray(checkpoint.messages)
+    ? checkpoint.messages
+      .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      .map(m => ({ role: m.role, content: m.content }))
+    : [];
+
+  return {
+    threadId: checkpoint.threadId,
+    ...(typeof checkpoint.publicThreadId === 'string' && checkpoint.publicThreadId.trim()
+      ? { publicThreadId: checkpoint.publicThreadId.trim() } : {}),
+    ...(typeof checkpoint.scope === 'string' ? { scope: checkpoint.scope } : {}),
+    ...(typeof checkpoint.title === 'string' && checkpoint.title.trim()
+      ? { title: checkpoint.title.trim() } : {}),
+    ...(typeof checkpoint.agent === 'string' && checkpoint.agent.trim()
+      ? { agent: checkpoint.agent.trim() } : {}),
+    messages: cleanMessages,
+    ...(typeof checkpoint.summary === 'string' && checkpoint.summary.trim()
+      ? { summary: checkpoint.summary.trim() } : {}),
+    ...(typeof checkpoint.summarizedCount === 'number' && Number.isSafeInteger(checkpoint.summarizedCount) && checkpoint.summarizedCount >= 0
+      ? { summarizedCount: checkpoint.summarizedCount } : {}),
+    ...(typeof checkpoint.createdAt === 'number' && Number.isFinite(checkpoint.createdAt)
+      ? { createdAt: checkpoint.createdAt } : {}),
+    updatedAt: checkpoint.updatedAt ?? Date.now(),
+  };
+}
 
 /**
  * 检查点服务 (CheckpointService)
  *
  * 【会话检查点读写与并发串行管理】
  * 1. 经由注入的抽象契约 MEMORY_STORE 操作底层持久化；
- * 2. 只持久化多轮对话 turns（user 与 assistant），绝不渗入中间 execution steps；
+ * 2. 只持久化多轮对话 turns 与可选线程摘要/元数据，绝不渗入中间 execution steps；
  * 3. 提供 runTurn(threadId, task) 串行化同一线程的并发轮次：优先委托 MemoryStore.runTurn（支持跨实例锁），
- *    否则使用进程内按 threadId 链式队列。
+ *    否则使用进程内按 threadId 链式队列；
+ * 4. 提供 list(query) 按 scope 分页列举线程检查点。
  */
 @Injectable()
 export class CheckpointService {
@@ -47,36 +80,22 @@ export class CheckpointService {
     if (!checkpoint) {
       return null;
     }
-
-    const validMessages = Array.isArray(checkpoint.messages)
-      ? checkpoint.messages
-        .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-        .map(m => ({ role: m.role, content: m.content }))
-      : [];
-
-    return {
-      threadId: checkpoint.threadId,
-      messages: validMessages,
-      updatedAt: checkpoint.updatedAt ?? Date.now(),
-    };
+    return sanitizeCheckpoint(checkpoint);
   }
 
   async save(checkpoint: ThreadCheckpoint): Promise<void> {
     if (!checkpoint || !checkpoint.threadId) {
       throw new Error('Checkpoint must contain a valid threadId');
     }
+    await this.store.save(sanitizeCheckpoint(checkpoint));
+  }
 
-    const cleanMessages = Array.isArray(checkpoint.messages)
-      ? checkpoint.messages
-        .filter(m => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-        .map(m => ({ role: m.role, content: m.content }))
-      : [];
-
-    await this.store.save({
-      threadId: checkpoint.threadId,
-      messages: cleanMessages,
-      updatedAt: checkpoint.updatedAt ?? Date.now(),
-    });
+  async list(query: MemoryListQuery): Promise<ThreadCheckpoint[]> {
+    if (typeof this.store.list !== 'function') {
+      throw new Error('Configured MemoryStore does not support listing threads');
+    }
+    const rows = await this.store.list(query);
+    return rows.map(sanitizeCheckpoint);
   }
 
   async delete(threadId: string): Promise<void> {

@@ -54,17 +54,37 @@ export interface MemoryEntry {
   content: string;
 }
 
+export interface MemoryListQuery {
+  scope?: string;
+  offset: number;
+  limit: number;
+}
+
 /**
  * 线程会话检查点契约 (ThreadCheckpoint)
  *
  * 【轻量持久化设计】
- * 仅保存多轮对话历史消息 turns，不存储中间复杂工具调用与观察步骤 (steps)
+ * 仅保存多轮对话历史消息 turns 及可选历史摘要/元数据，不存储中间复杂工具调用与观察步骤 (steps)
  */
 export interface ThreadCheckpoint {
-  /** 线程会话全局唯一标识符 (UUID) */
+  /** 线程存储唯一标识符（无 scope 时等于 threadId，有 scope 时为内部作用域 hash 键） */
   threadId: string;
+  /** 对外展示的原始线程 ID（用于列表与详情响应，避免暴露内部 hash 键） */
+  publicThreadId?: string;
+  /** 所属调用方隔离作用域 */
+  scope?: string;
+  /** 可选线程标题（支持重命名或首轮自动提取） */
+  title?: string;
+  /** 最近一次运行该线程的 Agent 名称 */
+  agent?: string;
   /** 历史对话消息序列 */
   messages: MemoryEntry[];
+  /** 早期对话增量摘要（保留关键约束、偏好与决策） */
+  summary?: string;
+  /** 已压缩至 summary 的累计历史消息条数 */
+  summarizedCount?: number;
+  /** 创建时间毫秒戳 */
+  createdAt?: number;
   /** 最近更新时间毫秒戳 (Date.now()) */
   updatedAt: number;
 }
@@ -78,7 +98,7 @@ export const MEMORY_STORE = Symbol('MEMORY_STORE');
  * 会话上下文与长期记忆存储契约 (MemoryStore)
  *
  * 【跨请求会话持久化】
- * 负责保存、读取与删除 Thread 的多轮对话检查点
+ * 负责保存、读取、列举与删除 Thread 的多轮对话检查点
  */
 export interface MemoryStore {
   /**
@@ -95,6 +115,11 @@ export interface MemoryStore {
    * @returns 匹配的检查点数据，未找到时返回 null
    */
   load(threadId: string): Promise<ThreadCheckpoint | null>;
+
+  /**
+   * 按 scope 分页列举历史会话线程检查点（按 updatedAt 倒序）
+   */
+  list?(query: MemoryListQuery): Promise<ThreadCheckpoint[]>;
 
   /**
    * 删除指定线程的会话历史记录

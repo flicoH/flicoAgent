@@ -29,6 +29,12 @@ export interface SkillDefinition {
   /** 此能力需要人工批准。 */
   approval?: 'required';
 
+  /** 单次执行超时时间（毫秒），优先级高于全局 ai.tools.timeoutMs */
+  timeoutMs?: number;
+
+  /** 单次输出最大字符数，优先级高于全局 ai.tools.maxOutputChars */
+  maxOutputChars?: number;
+
   /**
    * 技能的简明描述
    * 面向模型规划器与调用方，清晰说明此技能的作用、触发时机与预期结果

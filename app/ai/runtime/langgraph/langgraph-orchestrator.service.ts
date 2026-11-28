@@ -7,7 +7,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { ConfigService } from '../../../config/config.service';
 import type { AgentDefinition, AgentLoopMode } from '../../agent/agent.interface';
 import { AgentScannerService } from '../../agent/agent-scanner.service';
@@ -28,7 +28,8 @@ import {
 } from '../../contracts';
 import { GuardrailService } from '../../guardrail/guardrail.service';
 import { CheckpointService } from '../../memory/checkpoint.service';
-import { ThreadService } from '../../memory/thread.service';
+import { computeScopedCheckpointId, isScopedCheckpointKey } from '../../memory/internal/token-budget';
+import { ThreadService, type MemorySummarizer } from '../../memory/thread.service';
 import { collectCitations } from '../../rag/citations';
 import { resolveRagOptions } from '../../rag/internal/load-rag-config';
 import { SkillScannerService } from '../../skill/skill-scanner.service';
@@ -37,7 +38,7 @@ import { ExecutorService } from '../../tool/executor.service';
 import { ToolRegistryService } from '../../tool/tool-registry.service';
 import { summarizeTokenUsage } from '../../trace/token-usage';
 import { TraceService } from '../../trace/trace.service';
-import { resolveMaxIterations } from '../internal/load-runtime-config';
+import { resolveMaxIterations, resolveToolConcurrency } from '../internal/load-runtime-config';
 import { buildStructuredOutputInstruction } from '../internal/structured-output';
 import { LangChainPlannerService } from '../langchain/langchain-planner.service';
 import { AdaptedStructuredTool, SkillToolAdapter } from '../langchain/skill-tool.adapter';
@@ -45,8 +46,6 @@ import { createAgentGraph, defaultAgentGraph } from './agent.graph';
 import type { GraphStep } from './agent.state';
 
 const DELEGATE_TOOL = 'agent-delegate';
-const SCOPED_CHECKPOINT_PREFIX = 'agent-scope-';
-const SCOPED_CHECKPOINT_ID = /^agent-scope-[a-f0-9]{64}$/i;
 const MAX_CONCURRENT_RUNS = 4;
 const MAX_QUEUED_RUNS = 100;
 
@@ -409,8 +408,7 @@ export class LangGraphOrchestratorService {
 
     const threadId = this.threadService.ensureThread(requestedThreadId);
     if (access?.scope === undefined && this.threadService.isThreadEnabled()) {
-      const normalizedThreadId = decodeURIComponent(threadId).replace(/^\{|\}$/g, '').trim();
-      if (SCOPED_CHECKPOINT_ID.test(normalizedThreadId)) {
+      if (isScopedCheckpointKey(threadId)) {
         throw new BadRequestException('Invalid threadId');
       }
     }
@@ -430,9 +428,7 @@ export class LangGraphOrchestratorService {
   }
 
   private computeCheckpointId(scope: string | undefined, threadId: string): string {
-    return scope === undefined
-      ? threadId
-      : SCOPED_CHECKPOINT_PREFIX + createHash('sha256').update(JSON.stringify([scope, threadId])).digest('hex');
+    return computeScopedCheckpointId(scope, threadId);
   }
 
   private canAccessRun(run: TraceRun, access: AgentRunAccess): boolean {
@@ -725,10 +721,19 @@ export class LangGraphOrchestratorService {
       ...(agent.timeout !== undefined ? { timeout: agent.timeout } : {}),
     };
 
+    const toolConcurrency = agent.toolConcurrency ?? resolveToolConcurrency(this.config);
+
     const graph = createAgentGraph({
       planner: this.planner,
       executor: this.executor,
       allowed: { skills: agent.skills, tools: agent.tools },
+      toolConcurrency,
+      requiresApproval: (call) => {
+        if (call.name === DELEGATE_TOOL) {
+          return false;
+        }
+        return this.executor.willRequireApproval(call.name, call.args, agent, isDelegated);
+      },
       runId: run.runId,
       agentName,
       agentModel: agent.model,
@@ -864,6 +869,11 @@ export class LangGraphOrchestratorService {
       checkpointUpdatedAt,
       userInputText,
       finalOutput,
+      {
+        publicThreadId: run.threadId,
+        scope: run.scope,
+        agent: agentName,
+      },
     );
 
     const usage = summarizeTokenUsage(steps);
@@ -1104,11 +1114,14 @@ export class LangGraphOrchestratorService {
   }> {
     const checkpoint = threadEnabled ? await this.checkpointService.load(threadId) : null;
     const historicalMessages = checkpoint ? this.threadService.truncate(checkpoint.messages) : [];
-    const contextMessages = this.threadService.buildContextMessages({
-      threadId,
-      messages: historicalMessages,
-      updatedAt: checkpoint?.updatedAt ?? Date.now(),
-    });
+    const contextMessages = checkpoint
+      ? this.threadService.buildContextMessages({
+        ...checkpoint,
+        threadId,
+        messages: historicalMessages,
+        updatedAt: checkpoint.updatedAt ?? Date.now(),
+      })
+      : [];
     return { checkpoint, contextMessages };
   }
 
@@ -1156,10 +1169,23 @@ export class LangGraphOrchestratorService {
     expectedUpdatedAt: number,
     userInputText: string,
     finalOutput: string,
+    metadata?: { publicThreadId?: string; scope?: string; agent?: string },
   ): Promise<void> {
     if (!threadEnabled) {
       return;
     }
+    const summarizer: MemorySummarizer = async (summaryMessages, options) => {
+      if (typeof this.planner?.chat === 'function') {
+        const res = await this.planner.chat(summaryMessages, { model: options.model });
+        return res.output;
+      }
+      if (typeof this.planner?.plan === 'function') {
+        const res = await this.planner.plan(summaryMessages, [], { model: options.model });
+        return res.finalAnswer ?? '';
+      }
+      return '';
+    };
+
     const save = async () => {
       const latest = await this.checkpointService.load(checkpointId);
       if (isResumed && latest && latest.updatedAt > expectedUpdatedAt) {
@@ -1171,10 +1197,18 @@ export class LangGraphOrchestratorService {
         messages: [],
         updatedAt: 0,
       };
-      const updatedCheckpoint = this.threadService.appendTurn(baseCheckpoint, userInputText, finalOutput, checkpointId);
-      updatedCheckpoint.messages = this.threadService.truncate(updatedCheckpoint.messages);
-      updatedCheckpoint.updatedAt = Math.max(Date.now(), (baseCheckpoint.updatedAt || 0) + 1);
-      await this.checkpointService.save(updatedCheckpoint);
+      const appended = this.threadService.appendTurn(
+        baseCheckpoint,
+        userInputText,
+        finalOutput,
+        checkpointId,
+        metadata,
+      );
+      const compressed = typeof this.threadService.compressCheckpoint === 'function'
+        ? await this.threadService.compressCheckpoint(appended, summarizer)
+        : { ...appended, messages: this.threadService.truncate(appended.messages) };
+      compressed.updatedAt = Math.max(Date.now(), (baseCheckpoint.updatedAt || 0) + 1);
+      await this.checkpointService.save(compressed);
     };
 
     if (isResumed && typeof this.checkpointService?.runTurn === 'function') {

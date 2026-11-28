@@ -1,6 +1,9 @@
 import type { BuiltinToolFactory } from '../tool.interface';
+import calculatorTool from './calculator.tool';
+import httpRequestTool from './http-request.tool';
 import retrieveTool from './retrieve.tool';
 import serviceInvokeTool from './service-invoke.tool';
+import sqlQueryTool from './sql-query.tool';
 
 /**
  * 框架内置工具工厂清单 (builtinTools)
@@ -13,4 +16,7 @@ import serviceInvokeTool from './service-invoke.tool';
 export const builtinTools: BuiltinToolFactory[] = [
   retrieveTool,
   serviceInvokeTool,
+  httpRequestTool,
+  sqlQueryTool,
+  calculatorTool,
 ];

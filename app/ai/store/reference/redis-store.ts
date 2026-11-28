@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { TraceRun } from '../../contracts';
-import type { MemoryStore, ThreadCheckpoint, TraceListQuery, TraceStore } from '../store.interface';
+import type {
+  MemoryListQuery,
+  MemoryStore,
+  ThreadCheckpoint,
+  TraceListQuery,
+  TraceStore,
+} from '../store.interface';
 
 /**
  * 与 ioredis / node-redis 兼容的最小 Redis 客户端契约，避免框架强绑定特定 Redis 客户端版本。
@@ -12,6 +18,7 @@ export interface RedisLikeClient {
   eval?(script: string, numKeys: number, ...args: string[]): Promise<unknown>;
   zadd?(key: string, score: number, member: string): Promise<unknown>;
   zrevrange?(key: string, start: number, stop: number): Promise<string[]>;
+  zrem?(key: string, ...members: string[]): Promise<unknown>;
   expire?(key: string, seconds: number): Promise<unknown>;
 }
 
@@ -129,12 +136,22 @@ export class RedisMemoryStore implements MemoryStore {
     if (!checkpoint || typeof checkpoint.threadId !== 'string' || !checkpoint.threadId.trim()) {
       throw new Error('ThreadCheckpoint must have a valid string threadId');
     }
-    const key = this.threadKey(checkpoint.threadId);
+    const cleanId = checkpoint.threadId.trim();
+    const key = this.threadKey(cleanId);
     const payload = JSON.stringify(checkpoint);
     if (this.ttlMs) {
       await this.client.set(key, payload, 'PX', this.ttlMs);
     } else {
       await this.client.set(key, payload);
+    }
+
+    if (typeof this.client.zadd === 'function') {
+      const idxKey = this.indexKey(checkpoint.scope);
+      const score = checkpoint.updatedAt || Date.now();
+      await this.client.zadd(idxKey, score, cleanId);
+      if (this.ttlMs && typeof this.client.expire === 'function') {
+        await this.client.expire(idxKey, Math.max(1, Math.ceil(this.ttlMs / 1000)));
+      }
     }
   }
 
@@ -144,9 +161,39 @@ export class RedisMemoryStore implements MemoryStore {
     return raw ? (JSON.parse(raw) as ThreadCheckpoint) : null;
   }
 
+  async list(query: MemoryListQuery): Promise<ThreadCheckpoint[]> {
+    if (typeof this.client.zrevrange !== 'function') {
+      throw new Error('RedisLikeClient must implement zrevrange to list threads');
+    }
+    const offset = Math.max(0, Math.floor(query.offset || 0));
+    const limit = Math.max(0, Math.floor(query.limit || 0));
+    if (limit === 0) return [];
+
+    const idxKey = this.indexKey(query.scope);
+    const scanLimit = Math.max(200, (offset + limit) * 3);
+    const ids = await this.client.zrevrange(idxKey, 0, scanLimit - 1);
+
+    const matched: ThreadCheckpoint[] = [];
+    for (const id of ids) {
+      const checkpoint = await this.load(id);
+      if (!checkpoint) continue;
+      if (checkpoint.scope !== query.scope) continue;
+      matched.push(checkpoint);
+      if (matched.length >= offset + limit) break;
+    }
+    return matched.slice(offset, offset + limit);
+  }
+
   async delete(threadId: string): Promise<void> {
     if (!threadId || typeof threadId !== 'string') return;
-    await this.client.del(this.threadKey(threadId));
+    const cleanId = threadId.trim();
+    if (typeof this.client.zrem === 'function') {
+      const existing = await this.load(cleanId).catch(() => null);
+      if (existing) {
+        await this.client.zrem(this.indexKey(existing.scope), cleanId).catch(() => undefined);
+      }
+    }
+    await this.client.del(this.threadKey(cleanId));
   }
 
   async runTurn<T>(threadId: string, task: () => Promise<T>): Promise<T> {
@@ -183,5 +230,9 @@ export class RedisMemoryStore implements MemoryStore {
 
   private threadKey(threadId: string): string {
     return `${this.keyPrefix}:thread:${sha256(threadId.trim())}`;
+  }
+
+  private indexKey(scope?: string): string {
+    return `${this.keyPrefix}:idx:${scopeKey(scope)}`;
   }
 }

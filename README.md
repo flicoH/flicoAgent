@@ -262,6 +262,17 @@ export default {
 
 在 `AgentDefinition` 中声明 `outputSchema`（JSON Schema）与可选 `maxOutputRetries`（默认 `2`）后，框架会在提示词中自动注入结构约束、使用 `ajv` 严格校验最终输出 JSON，并在格式不合法时自动触发有限次纠错重试。校验通过后，同步接口、SSE `done` 与 Trace 会同时返回规范化的 JSON 字符串 `output` 与可直接消费的 `structuredOutput`；超出重试上限时在终态步骤记录 `INVALID_STRUCTURED_OUTPUT`。完整示例见 [Agent 结构化输出](docs/agent-operations.md#agent-结构化输出outputschema)。
 
+### 并行工具调用与内置通用工具包
+
+- **同轮受控并发**：单轮多 `tool_calls`（含多子 Agent 委派）默认以 `toolConcurrency: 4` 并发执行（支持全局 `ai.runtime.toolConcurrency` 与 Agent 级覆盖），在审批点自动设立并发屏障并严格按原始顺序回写结果与步骤。
+- **统一超时与截断**：所有 Skill/Tool/MCP 调用默认受 `ai.tools.timeoutMs`（30s，超时返回 `TOOL_TIMEOUT`）与 `ai.tools.maxOutputChars`（16,000 字符，超限截断并标注 `truncated: true`）保护，支持能力级覆盖。
+- **内置工具包**：除 `retrieve` 与 `service-invoke` 外，新增受控 HTTP（`http-request`，域名/方法白名单 + 防 SSRF + 重定向复检）、只读 SQL（`sql-query`，单语句只读校验 + 表级 ACL + 行数上限）与零 `eval` 数学公式计算器（`calculator`）。详见 [并行工具调用、超时截断与内置通用工具包](docs/agent-operations.md#并行工具调用超时截断与内置通用工具包)。
+
+### 记忆预算裁剪、自动摘要压缩与线程管理
+
+- **Token 预算与摘要压缩**：在 `ai.store.memory`（或 `ai.memory`）中配置 `maxContextTokens` 与 `summarization: { enabled: true }` 后，框架会在构造上下文时按中英文混合 Token 预算裁剪，并在超长会话时自动将早期对话增量压缩为持久化 `summary`（下轮自动前置注入系统摘要，失败时优雅降级），保留早期约束不丢失。
+- **线程管理 API**：提供 `GET /api/ai/threads`、`GET /api/ai/threads/:threadId`、`PATCH /api/ai/threads/:threadId`、`POST /api/ai/threads/:threadId/clear` 与 `DELETE /api/ai/threads/:threadId`，全部按 `scope` 严格隔离并支持 File / MySQL / Redis 三套存储驱动。详见 [Token 预算裁剪、历史摘要压缩与线程管理](docs/agent-operations.md#token-预算裁剪历史摘要压缩与线程管理)。
+
 ### 多 Agent 委派
 
 在 Agent 声明中设置 `delegates` 后，可以通过保留工具 `agent-delegate` 调用列出的子 Agent。父执行步骤提供 `childRunId`，子 Trace 提供 `parentRunId`、`rootRunId` 和 `delegationDepth`。配置及离线测试步骤见 [Agent 委派接入示例](docs/agent-delegation.md)。

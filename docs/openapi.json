@@ -6,6 +6,154 @@
     {"signature": [], "timestamp": [], "session": []}
   ],
   "paths": {
+    "/api/ai/threads": {
+      "get": {
+        "summary": "分页查询当前 scope 可访问的会话线程",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            "required": false
+          },
+          {"name": "offset", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}, "required": false}
+        ],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "limit": {"type": "integer", "minimum": 1},
+                        "offset": {"type": "integer", "minimum": 0},
+                        "items": {"type": "array", "items": {"$ref": "#/components/schemas/ThreadSummary"}}
+                      },
+                      "required": ["limit", "offset", "items"]
+                    }
+                  },
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "分页参数无效。"},
+          "401": {"description": "未通过 AI 身份验证。"}
+        }
+      }
+    },
+    "/api/ai/threads/{threadId}": {
+      "get": {
+        "summary": "查询单个会话线程的历史消息与摘要",
+        "parameters": [{"name": "threadId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/ThreadDetail"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "threadId 无效。"},
+          "401": {"description": "未通过 AI 身份验证。"},
+          "404": {"description": "线程不存在或无权访问。"}
+        }
+      },
+      "patch": {
+        "summary": "更新会话线程标题",
+        "parameters": [{"name": "threadId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string", "minLength": 1, "maxLength": 200}},
+                "required": ["title"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/ThreadSummary"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "title 或 threadId 无效。"},
+          "401": {"description": "未通过 AI 身份验证。"},
+          "404": {"description": "线程不存在或无权访问。"}
+        }
+      },
+      "delete": {
+        "summary": "删除会话线程及其历史记忆",
+        "parameters": [{"name": "threadId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {"const": true},
+                    "data": {
+                      "type": "object",
+                      "properties": {"threadId": {"type": "string"}, "deleted": {"const": true}},
+                      "required": ["threadId", "deleted"]
+                    }
+                  },
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "threadId 无效。"},
+          "401": {"description": "未通过 AI 身份验证。"},
+          "404": {"description": "线程不存在或无权访问。"}
+        }
+      }
+    },
+    "/api/ai/threads/{threadId}/clear": {
+      "post": {
+        "summary": "清空会话线程消息与摘要（保留线程记录与标题）",
+        "parameters": [{"name": "threadId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "成功。",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {"success": {"const": true}, "data": {"$ref": "#/components/schemas/ThreadSummary"}},
+                  "required": ["success", "data"]
+                }
+              }
+            }
+          },
+          "400": {"description": "threadId 无效。"},
+          "401": {"description": "未通过 AI 身份验证。"},
+          "404": {"description": "线程不存在或无权访问。"}
+        }
+      }
+    },
     "/api/ai/agent/runs": {
       "get": {
         "summary": "分页查询运行",
@@ -897,6 +1045,7 @@
           "source": {"enum": ["builtin", "mcp"]},
           "input": {},
           "output": {},
+          "truncated": {"type": "boolean"},
           "error": {"$ref": "#/components/schemas/StepError"},
           "childRunId": {"type": "string"},
           "citations": {"type": "array", "items": {"$ref": "#/components/schemas/Citation"}},
@@ -970,7 +1119,8 @@
           "topP": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
           "timeoutMs": {"type": "integer", "minimum": 1},
           "outputSchema": {"type": "object"},
-          "maxOutputRetries": {"type": "integer", "minimum": 0, "default": 2}
+          "maxOutputRetries": {"type": "integer", "minimum": 0, "default": 2},
+          "toolConcurrency": {"type": "integer", "minimum": 1, "default": 4}
         },
         "required": ["name", "skills", "tools"]
       },
@@ -979,10 +1129,55 @@
         "properties": {
           "threadEnabled": {"type": "boolean"},
           "maxIterations": {"type": "integer", "minimum": 1},
+          "toolConcurrency": {"type": "integer", "minimum": 1},
           "memory": {
             "type": "object",
-            "properties": {"maxTurns": {"type": "integer", "minimum": 1}},
+            "properties": {
+              "maxTurns": {"type": "integer", "minimum": 1},
+              "maxContextTokens": {"type": "integer", "minimum": 1},
+              "summarization": {
+                "type": "object",
+                "properties": {
+                  "enabled": {"type": "boolean"},
+                  "model": {"type": "string"},
+                  "triggerTokens": {"type": "integer", "minimum": 1},
+                  "keepRecentMessages": {"type": "integer", "minimum": 2},
+                  "maxSummaryChars": {"type": "integer", "minimum": 1}
+                },
+                "required": ["enabled", "triggerTokens", "keepRecentMessages", "maxSummaryChars"]
+              }
+            },
             "required": ["maxTurns"]
+          },
+          "tools": {
+            "type": "object",
+            "properties": {
+              "timeoutMs": {"type": "integer", "minimum": 1},
+              "maxOutputChars": {"type": "integer", "minimum": 1},
+              "http": {
+                "type": "object",
+                "properties": {
+                  "enabled": {"type": "boolean"},
+                  "allowedHosts": {"type": "array", "items": {"type": "string"}},
+                  "allowedMethods": {"type": "array", "items": {"type": "string"}},
+                  "allowPrivateNetworks": {"type": "boolean"},
+                  "timeoutMs": {"type": "integer", "minimum": 1},
+                  "maxResponseBytes": {"type": "integer", "minimum": 1}
+                },
+                "required": ["enabled", "allowedHosts", "allowedMethods", "allowPrivateNetworks", "timeoutMs", "maxResponseBytes"]
+              },
+              "sql": {
+                "type": "object",
+                "properties": {
+                  "enabled": {"type": "boolean"},
+                  "maxRows": {"type": "integer", "minimum": 1},
+                  "timeoutMs": {"type": "integer", "minimum": 1},
+                  "allowedTables": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["enabled", "maxRows", "timeoutMs"]
+              }
+            },
+            "required": ["timeoutMs", "maxOutputChars", "http", "sql"]
           },
           "llm": {
             "type": "object",
@@ -1066,6 +1261,44 @@
           }
         },
         "required": ["threadEnabled", "maxIterations", "memory", "llm", "embedding", "rag", "mcp", "guardrail"]
+      },
+      "ThreadSummary": {
+        "type": "object",
+        "properties": {
+          "threadId": {"type": "string"},
+          "title": {"type": "string"},
+          "agent": {"type": "string"},
+          "messageCount": {"type": "integer", "minimum": 0},
+          "summarizedCount": {"type": "integer", "minimum": 0},
+          "hasSummary": {"type": "boolean"},
+          "estimatedTokens": {"type": "integer", "minimum": 0},
+          "createdAt": {"type": "integer"},
+          "updatedAt": {"type": "integer"}
+        },
+        "required": ["threadId", "messageCount", "summarizedCount", "hasSummary", "estimatedTokens", "updatedAt"]
+      },
+      "ThreadDetail": {
+        "allOf": [
+          {"$ref": "#/components/schemas/ThreadSummary"},
+          {
+            "type": "object",
+            "properties": {
+              "summary": {"type": "string"},
+              "messages": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "role": {"enum": ["user", "assistant"]},
+                    "content": {"type": "string"}
+                  },
+                  "required": ["role", "content"]
+                }
+              }
+            },
+            "required": ["messages"]
+          }
+        ]
       },
       "Graph": {
         "type": "object",

@@ -64,6 +64,8 @@ function isAgentDefinition(value: unknown): value is AgentDefinition {
     && (agent.outputSchema === undefined || isValidOutputSchema(agent.outputSchema))
     && (agent.maxOutputRetries === undefined
       || (typeof agent.maxOutputRetries === 'number' && Number.isSafeInteger(agent.maxOutputRetries) && agent.maxOutputRetries >= 0))
+    && (agent.toolConcurrency === undefined
+      || (typeof agent.toolConcurrency === 'number' && Number.isSafeInteger(agent.toolConcurrency) && agent.toolConcurrency > 0))
     && (agent.mode === undefined || isAgentLoopMode(agent.mode))
     && (agent.maxReflectionRevisions === undefined
       || (Number.isSafeInteger(agent.maxReflectionRevisions) && agent.maxReflectionRevisions >= 0));

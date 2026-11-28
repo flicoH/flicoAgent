@@ -19,6 +19,7 @@ export type { RedisLikeClient, RedisStoreCommonOptions } from './ai/store/refere
 export type {
   TraceListQuery,
   TraceStore,
+  MemoryListQuery,
   MemoryEntry,
   ThreadCheckpoint,
   MemoryStore,
@@ -44,8 +45,11 @@ export type {
   VectorStoreOptions,
   VectorStoreDriver,
   MemoryStoreOptions,
+  MemorySummarizationOptions,
   MemoryStoreDriver,
   AiToolsOptions,
+  HttpToolOptions,
+  SqlToolOptions,
   AgentAccessOptions,
   AiRuntimeOptions,
   AgentConfigOptions,
@@ -57,7 +61,31 @@ export { InMemoryNonceStore, MysqlNonceStore, RedisNonceStore } from './ai/acces
 export { MysqlTraceStore } from './ai/store/reference/mysql-trace.store';
 export { MysqlMemoryStore } from './ai/store/reference/mysql-memory.store';
 export { RedisTraceStore, RedisMemoryStore } from './ai/store/reference/redis-store';
-export { CapabilityApprovalRequired, CapabilityInputInvalid } from './ai/tool/executor.service';
+export {
+  CapabilityApprovalRequired,
+  CapabilityInputInvalid,
+  CapabilityTimeoutError,
+} from './ai/tool/executor.service';
+export type { TruncatedOutputEnvelope, TruncateToolOutputResult } from './ai/tool/internal/tool-guard';
+export { truncateToolOutput } from './ai/tool/internal/tool-guard';
+export type { SqlValidationOptions, SqlValidationResult } from './ai/tool/builtin/sql-query.tool';
+export { validateReadOnlySql } from './ai/tool/builtin/sql-query.tool';
+export { evaluateMathExpression } from './ai/tool/builtin/calculator.tool';
+export { isHostAllowed, isPrivateIpAddress } from './ai/tool/builtin/http-request.tool';
+export { resolveToolConcurrency } from './ai/runtime/internal/load-runtime-config';
+export type { TokenBudgetTrimResult } from './ai/memory/internal/token-budget';
+export {
+  computeScopedCheckpointId,
+  estimateTextTokens,
+  estimateMessageTokens,
+  estimateMessagesTokens,
+  trimMessagesToTokenBudget,
+} from './ai/memory/internal/token-budget';
+export type { ResolvedMemorySummarizationOptions } from './ai/memory/internal/load-memory-config';
+export {
+  resolveMemoryMaxContextTokens,
+  resolveMemorySummarizationOptions,
+} from './ai/memory/internal/load-memory-config';
 export type { LlmCircuitSnapshot } from './ai/runtime/internal/llm-circuit-breaker';
 export { LlmCircuitBreakerService, LlmCircuitOpenError } from './ai/runtime/internal/llm-circuit-breaker';
 export type { StructuredOutputValidationResult } from './ai/runtime/internal/structured-output';

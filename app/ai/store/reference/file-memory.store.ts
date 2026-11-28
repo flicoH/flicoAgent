@@ -1,7 +1,7 @@
-import { existsSync, mkdirSync } from 'node:fs';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdirSync } from 'node:fs';
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { MemoryStore, ThreadCheckpoint } from '../store.interface';
+import type { MemoryListQuery, MemoryStore, ThreadCheckpoint } from '../store.interface';
 
 /**
  * 文件型 Memory 存储唯一实现 (FileMemoryStore)
@@ -64,6 +64,50 @@ export class FileMemoryStore implements MemoryStore {
       }
       throw error;
     }
+  }
+
+  /**
+   * 按 scope 分页列举会话检查点（按 updatedAt 倒序）
+   */
+  async list(query: MemoryListQuery): Promise<ThreadCheckpoint[]> {
+    const offset = Math.max(0, Math.floor(query.offset || 0));
+    const limit = Math.max(0, Math.floor(query.limit || 0));
+    if (limit === 0) {
+      return [];
+    }
+
+    let entries: string[];
+    try {
+      entries = await readdir(this.rootDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
+    }
+
+    const matched: ThreadCheckpoint[] = [];
+    for (const file of entries) {
+      if (!file.endsWith('.json')) {
+        continue;
+      }
+      try {
+        const raw = await readFile(join(this.rootDir, file), 'utf8');
+        const checkpoint = JSON.parse(raw) as ThreadCheckpoint;
+        if (!checkpoint || typeof checkpoint.threadId !== 'string') {
+          continue;
+        }
+        if (checkpoint.scope !== query.scope) {
+          continue;
+        }
+        matched.push(checkpoint);
+      } catch {
+        // 忽略并发替换中的临时/损坏文件
+      }
+    }
+
+    matched.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    return matched.slice(offset, offset + limit);
   }
 
   /**
